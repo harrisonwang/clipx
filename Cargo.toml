@@ -1,14 +1,17 @@
 [package]
-name = "clipboard"
-version = "0.1.0"
+name = "clipx"
+version = "0.2.0"
 edition = "2024"
-description = "Copy a file to the system clipboard"
-license = "MIT OR Apache-2.0"
+description = "跨设备剪贴板同步与文件复制工具"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
-arboard = { version = "3", default-features = false }
+arboard = "3"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 
 [[bin]]
-name = "copy"
+name = "clipx"
 path = "src/main.rs"
