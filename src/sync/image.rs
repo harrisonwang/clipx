@@ -14,7 +14,7 @@ pub(super) struct CapturedImage {
     fingerprint: u64,
     width: u32,
     height: u32,
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<[u8]>,
 }
 
 pub(super) struct CachedImage {
@@ -65,8 +65,10 @@ pub(super) fn capture_image(
         return Ok(Some(cached.image.clone()));
     }
 
-    let bytes = Arc::new(encode_png(width, height, image.bytes.as_ref())?);
-    let fingerprint = image_payload_fingerprint(width, height, bytes.as_ref());
+    let bytes: Arc<[u8]> = encode_png(width, height, image.bytes.as_ref())?
+        .into_boxed_slice()
+        .into();
+    let fingerprint = image_fingerprint(width, height, bytes.as_ref());
     let captured = CapturedImage {
         fingerprint,
         width,
@@ -82,6 +84,7 @@ pub(super) fn capture_image(
 
 pub(super) fn send_image_transfer(
     hub: &PeerHub,
+    peers: &[u64],
     id: &str,
     fingerprint: u64,
     image: &CapturedImage,
@@ -94,33 +97,43 @@ pub(super) fn send_image_transfer(
                 format_bytes(MAX_IMAGE_TRANSFER_BYTES as u64)
             );
         }
-        hub.send_required(&WireMessage::ImageStart {
-            id: id.to_string(),
-            fingerprint,
-            width: image.width,
-            height: image.height,
-            size,
-        })?;
+        hub.send_to_targets(
+            peers,
+            &WireMessage::ImageStart {
+                id: id.to_string(),
+                fingerprint,
+                width: image.width,
+                height: image.height,
+                size,
+            },
+        )?;
 
         let mut offset = 0u64;
         for chunk in image.bytes.chunks(CHUNK_SIZE) {
-            hub.send_required(&WireMessage::ImageChunk {
-                id: id.to_string(),
-                offset,
-                bytes: chunk.to_vec(),
-            })?;
+            hub.send_to_targets(
+                peers,
+                &WireMessage::ImageChunk {
+                    id: id.to_string(),
+                    offset,
+                    bytes: chunk.to_vec(),
+                },
+            )?;
             offset = offset
-                .checked_add(u64::try_from(chunk.len()).expect("图片分块大小应可转换为 u64"))
+                .checked_add(u64::try_from(chunk.len()).context("图片分块大小溢出")?)
                 .context("图片偏移量溢出")?;
         }
         let sha256: [u8; 32] = Sha256::digest(image.bytes.as_ref()).into();
-        hub.send_required(&WireMessage::ImageEnd {
-            id: id.to_string(),
-            sha256,
-        })
+        hub.send_to_targets(
+            peers,
+            &WireMessage::ImageEnd {
+                id: id.to_string(),
+                sha256,
+            },
+        )?;
+        Ok(())
     })();
     if result.is_err() {
-        let _ = hub.send_message(&WireMessage::TransferAbort { id: id.to_string() });
+        let _ = hub.send_to_targets(peers, &WireMessage::TransferAbort { id: id.to_string() });
     }
     result
 }
@@ -159,7 +172,7 @@ impl IncomingImage {
         }
         let next = self
             .received_size
-            .checked_add(u64::try_from(bytes.len()).expect("图片分块大小应可转换为 u64"))
+            .checked_add(u64::try_from(bytes.len()).context("图片分块大小溢出")?)
             .context("图片接收大小溢出")?;
         if next > self.expected_size {
             bail!("图片接收大小超过声明值")
@@ -182,12 +195,16 @@ impl IncomingImage {
         if actual_sha256 != expected_sha256 {
             bail!("图片 SHA-256 校验不匹配")
         }
+        let actual_fingerprint = image_fingerprint(self.width, self.height, &self.bytes);
+        if actual_fingerprint != self.fingerprint {
+            bail!("图片 fingerprint 校验不匹配")
+        }
         let (decoded_width, decoded_height, _) = decode_png(&self.bytes)?;
         if decoded_width != self.width || decoded_height != self.height {
             bail!("图片尺寸与传输清单不一致")
         }
         Ok((
-            self.fingerprint,
+            actual_fingerprint,
             ClipboardPayload::Image {
                 width: self.width,
                 height: self.height,
@@ -283,11 +300,10 @@ fn image_fingerprint(width: u32, height: u32, bytes: &[u8]) -> u64 {
     hasher.update(height.to_be_bytes());
     hasher.update(bytes);
     let digest = hasher.finalize();
-    u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 摘要长度应足够"))
-}
-
-fn image_payload_fingerprint(width: u32, height: u32, bytes: &[u8]) -> u64 {
-    image_fingerprint(width, height, bytes)
+    let mut prefix = [0u8; 8];
+    const FINGERPRINT_BYTES: usize = 8;
+    prefix.copy_from_slice(&digest[..FINGERPRINT_BYTES]);
+    u64::from_be_bytes(prefix)
 }
 
 #[cfg(test)]
@@ -321,7 +337,7 @@ mod tests {
         let encoded = encode_png(width as u32, height as u32, &pixels).unwrap();
         assert!(encoded.len() > FRAME_LIMIT);
 
-        let fingerprint = image_payload_fingerprint(width as u32, height as u32, &encoded);
+        let fingerprint = image_fingerprint(width as u32, height as u32, &encoded);
         let mut incoming = IncomingImage::start(
             fingerprint,
             width as u32,
@@ -351,5 +367,15 @@ mod tests {
             }
             ClipboardPayload::Text(_) => panic!("图片传输返回了文本"),
         }
+    }
+
+    #[test]
+    fn incoming_image_rejects_wrong_fingerprint() {
+        let pixels = [255, 0, 0, 255];
+        let encoded = encode_png(1, 1, &pixels).unwrap();
+        let mut incoming = IncomingImage::start(0, 1, 1, encoded.len() as u64).unwrap();
+        incoming.accept_chunk(0, &encoded).unwrap();
+        let sha256: [u8; 32] = Sha256::digest(&encoded).into();
+        assert!(incoming.finish(sha256).is_err());
     }
 }

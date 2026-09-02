@@ -48,21 +48,22 @@ pub(super) struct CapturedFiles {
     pub(super) identity: u64,
     pub(super) internal: bool,
 }
-pub(super) fn capture_files(paths: Vec<PathBuf>) -> Result<CapturedFiles> {
+
+pub(super) fn capture_files(paths: &[PathBuf]) -> Result<CapturedFiles> {
+    if paths.is_empty() {
+        bail!("复制项目为空")
+    }
+
     let internal = paths.iter().any(|path| is_internal_cache_path(path));
     let mut entries = Vec::new();
     let mut names = HashSet::new();
 
     for path in paths {
-        let root_name = path.file_name().context("无法读取复制项目的文件名")?;
-        collect_entry(&path, PathBuf::from(root_name), &mut entries, &mut names)?;
-    }
-
-    if entries.is_empty() {
-        bail!("复制项目为空")
-    }
-    if entries.len() > MAX_MANIFEST_ENTRIES {
-        bail!("目录项目数量超过限制（最多 {MAX_MANIFEST_ENTRIES} 项）")
+        let root_name = path
+            .file_name()
+            .context("无法读取复制项目的文件名")?
+            .to_owned();
+        capture_entry(path, PathBuf::from(root_name), &mut entries, &mut names)?;
     }
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -76,6 +77,70 @@ pub(super) fn capture_files(paths: Vec<PathBuf>) -> Result<CapturedFiles> {
         identity: hasher.finish(),
         internal,
     })
+}
+
+fn capture_entry(
+    source: &Path,
+    relative: PathBuf,
+    entries: &mut Vec<LocalEntry>,
+    names: &mut HashSet<Vec<u8>>,
+) -> Result<()> {
+    if entries.len() >= MAX_MANIFEST_ENTRIES {
+        bail!("目录项目数量超过限制（最多 {MAX_MANIFEST_ENTRIES} 项）")
+    }
+
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("读取复制项目失败：{}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!("暂不支持符号链接：{}", source.display())
+    }
+
+    let wire_path = portable_relative_path(&relative)?;
+    if !names.insert(path_collision_key(&wire_path)) {
+        bail!("复制项目存在重名路径：{}", path_display(&wire_path))
+    }
+    let normalized_path = safe_relative_path(&wire_path)?;
+
+    let (kind, size, child_source) = if metadata.is_dir() {
+        (TransferEntryKind::Directory, 0, None)
+    } else if metadata.is_file() {
+        (
+            TransferEntryKind::File,
+            metadata.len(),
+            Some(source.to_path_buf()),
+        )
+    } else {
+        bail!("暂不支持特殊文件：{}", source.display())
+    };
+
+    entries.push(LocalEntry {
+        entry: TransferEntry {
+            path: wire_path,
+            kind,
+            size,
+            mode: file_mode(&metadata),
+        },
+        source: child_source,
+        modified_nanos: modified_nanos(&metadata),
+    });
+
+    if matches!(kind, TransferEntryKind::Directory) {
+        let mut children = fs::read_dir(source)
+            .with_context(|| format!("读取目录失败：{}", source.display()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .with_context(|| format!("读取目录内容失败：{}", source.display()))?;
+        children.sort_by_key(|child| child.file_name());
+        for child in children {
+            capture_entry(
+                &child.path(),
+                normalized_path.join(child.file_name()),
+                entries,
+                names,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn is_internal_cache_path(path: &Path) -> bool {
@@ -106,78 +171,25 @@ fn manifest_identity(directory: &Path, entries: &[TransferEntry]) -> Result<u64>
     Ok(hasher.finish())
 }
 
-fn collect_entry(
-    source: &Path,
-    relative: PathBuf,
-    entries: &mut Vec<LocalEntry>,
-    names: &mut HashSet<Vec<u8>>,
+pub(super) fn send_file_transfer(
+    hub: &PeerHub,
+    peers: &[u64],
+    id: &str,
+    files: &CapturedFiles,
 ) -> Result<()> {
-    if entries.len() >= MAX_MANIFEST_ENTRIES {
-        bail!("目录项目数量超过限制（最多 {MAX_MANIFEST_ENTRIES} 项）")
-    }
-
-    let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("读取复制项目失败：{}", source.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!("暂不支持符号链接：{}", source.display())
-    }
-
-    let relative = portable_relative_path(&relative)?;
-    if !names.insert(path_collision_key(&relative)) {
-        bail!("复制项目存在重名路径：{}", path_display(&relative))
-    }
-
-    let (kind, size, child_source) = if metadata.is_dir() {
-        (TransferEntryKind::Directory, 0, None)
-    } else if metadata.is_file() {
-        (
-            TransferEntryKind::File,
-            metadata.len(),
-            Some(source.to_path_buf()),
-        )
-    } else {
-        bail!("暂不支持特殊文件：{}", source.display())
-    };
-
-    let local = LocalEntry {
-        entry: TransferEntry {
-            path: relative.clone(),
-            kind,
-            size,
-            mode: file_mode(&metadata),
-        },
-        source: child_source,
-        modified_nanos: modified_nanos(&metadata),
-    };
-    entries.push(local);
-
-    if matches!(kind, TransferEntryKind::Directory) {
-        let mut children = fs::read_dir(source)
-            .with_context(|| format!("读取目录失败：{}", source.display()))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .with_context(|| format!("读取目录内容失败：{}", source.display()))?;
-        children.sort_by_key(|child| child.file_name());
-        for child in children {
-            collect_entry(
-                &child.path(),
-                path_from_wire(&relative).join(child.file_name()),
-                entries,
-                names,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-pub(super) fn send_file_transfer(hub: &PeerHub, id: &str, files: &CapturedFiles) -> Result<()> {
-    let result = send_file_transfer_inner(hub, id, files);
+    let result = send_file_transfer_inner(hub, peers, id, files);
     if result.is_err() {
-        let _ = hub.send_message(&WireMessage::TransferAbort { id: id.to_string() });
+        let _ = hub.send_to_targets(peers, &WireMessage::TransferAbort { id: id.to_string() });
     }
     result
 }
 
-fn send_file_transfer_inner(hub: &PeerHub, id: &str, files: &CapturedFiles) -> Result<()> {
+fn send_file_transfer_inner(
+    hub: &PeerHub,
+    peers: &[u64],
+    id: &str,
+    files: &CapturedFiles,
+) -> Result<()> {
     let entries = files
         .entries
         .iter()
@@ -193,11 +205,13 @@ fn send_file_transfer_inner(hub: &PeerHub, id: &str, files: &CapturedFiles) -> R
         )
     }
 
-    hub.send_required(&WireMessage::TransferStart {
-        id: id.to_string(),
-        fingerprint: files.identity,
-        entries,
-    })?;
+    hub.send_to_targets(
+        peers,
+        &WireMessage::TransferStart {
+            id: id.to_string(),
+            entries,
+        },
+    )?;
 
     let mut file_index = 0u32;
     let mut buffer = vec![0u8; CHUNK_SIZE];
@@ -211,6 +225,15 @@ fn send_file_transfer_inner(hub: &PeerHub, id: &str, files: &CapturedFiles) -> R
             "剪贴板同步：正在读取文件 {}",
             path_display(&local.entry.path)
         );
+        let before = fs::symlink_metadata(source)
+            .with_context(|| format!("读取文件元数据失败：{}", source.display()))?;
+        if !before.is_file()
+            || before.len() != local.entry.size
+            || file_mode(&before) != local.entry.mode
+            || modified_nanos(&before) != local.modified_nanos
+        {
+            bail!("文件在传输前发生变化：{}", source.display())
+        }
         let mut file =
             File::open(source).with_context(|| format!("打开文件失败：{}", source.display()))?;
         let mut hasher = Sha256::new();
@@ -224,35 +247,51 @@ fn send_file_transfer_inner(hub: &PeerHub, id: &str, files: &CapturedFiles) -> R
                 break;
             }
 
-            let length_u64 = u64::try_from(length).expect("分块大小应可转换为 u64");
+            let length_u64 = u64::try_from(length).context("文件分块大小溢出")?;
             let next_offset = offset.checked_add(length_u64).context("文件大小溢出")?;
             if next_offset > local.entry.size {
                 bail!("文件在传输过程中变大：{}", source.display())
             }
             hasher.update(&buffer[..length]);
-            hub.send_required(&WireMessage::TransferChunk {
-                id: id.to_string(),
-                file_index,
-                offset,
-                bytes: buffer[..length].to_vec(),
-            })?;
+            hub.send_to_targets(
+                peers,
+                &WireMessage::TransferChunk {
+                    id: id.to_string(),
+                    file_index,
+                    offset,
+                    bytes: buffer[..length].to_vec(),
+                },
+            )?;
             offset = next_offset;
         }
 
         if offset != local.entry.size {
             bail!("文件在传输过程中发生变化：{}", source.display())
         }
+        let after = fs::symlink_metadata(source)
+            .with_context(|| format!("读取文件元数据失败：{}", source.display()))?;
+        if !after.is_file()
+            || after.len() != local.entry.size
+            || file_mode(&after) != local.entry.mode
+            || modified_nanos(&after) != local.modified_nanos
+        {
+            bail!("文件在传输过程中发生变化：{}", source.display())
+        }
         let sha256: [u8; 32] = hasher.finalize().into();
-        hub.send_required(&WireMessage::TransferFileEnd {
-            id: id.to_string(),
-            file_index,
-            sha256,
-        })?;
+        hub.send_to_targets(
+            peers,
+            &WireMessage::TransferFileEnd {
+                id: id.to_string(),
+                file_index,
+                sha256,
+            },
+        )?;
         file_index = file_index.checked_add(1).context("文件数量溢出")?;
     }
 
-    hub.send_required(&WireMessage::TransferEnd { id: id.to_string() })
+    hub.send_to_targets(peers, &WireMessage::TransferEnd { id: id.to_string() })
 }
+
 pub(super) struct IncomingTransfer {
     directory: PathBuf,
     parts_directory: PathBuf,
@@ -278,17 +317,17 @@ pub(super) struct FinishedTransfer {
 }
 
 impl IncomingTransfer {
-    pub(super) fn start(id: String, entries: Vec<TransferEntry>) -> Result<Self> {
+    pub(super) fn start(
+        id: String,
+        cache_scope: &str,
+        entries: Vec<TransferEntry>,
+    ) -> Result<Self> {
         if entries.is_empty() {
             bail!("传输清单为空")
         }
         if entries.len() > MAX_MANIFEST_ENTRIES {
             bail!("传输清单项目数量超过限制")
         }
-        if id.is_empty() {
-            bail!("传输标识不能为空")
-        }
-
         let total_bytes = entries.iter().try_fold(0u64, |total, entry| {
             total
                 .checked_add(entry.size)
@@ -300,7 +339,7 @@ impl IncomingTransfer {
 
         let directory = env::temp_dir()
             .join(CACHE_DIRECTORY_NAME)
-            .join(transfer_component(&id));
+            .join(transfer_component(&format!("{cache_scope}-{id}")));
         let parts_directory = directory.join(".parts");
         fs::create_dir_all(&parts_directory)
             .with_context(|| format!("创建临时传输目录失败：{}", directory.display()))?;
@@ -321,7 +360,7 @@ impl IncomingTransfer {
         let mut path_kinds = HashMap::with_capacity(entries.len());
         for entry in &entries {
             let relative = safe_relative_path(&entry.path)?;
-            let key = path_collision_key(&entry.path);
+            let key = normalized_collision_key(&relative)?;
             if path_kinds.insert(key, entry.kind).is_some() {
                 bail!("传输清单存在重复路径：{}", path_display(&entry.path))
             }
@@ -335,7 +374,7 @@ impl IncomingTransfer {
                 if path.as_os_str().is_empty() {
                     break;
                 }
-                let key = path_collision_key(&path_to_wire(path));
+                let key = normalized_collision_key(path)?;
                 if path_kinds.get(&key) == Some(&TransferEntryKind::File) {
                     bail!(
                         "传输清单中，文件不能作为目录父级：{}",
@@ -346,14 +385,10 @@ impl IncomingTransfer {
             }
         }
 
-        let mut seen_paths = HashSet::new();
         let mut roots = Vec::new();
         let mut files = Vec::new();
 
         for (entry_index, (entry, relative)) in entries.iter().zip(&normalized_paths).enumerate() {
-            if !seen_paths.insert(path_collision_key(&entry.path)) {
-                bail!("传输清单存在重复路径：{}", path_display(&entry.path))
-            }
             let final_path = directory.join(relative);
             if relative.components().count() == 1 {
                 roots.push(final_path.clone());
@@ -421,7 +456,7 @@ impl IncomingTransfer {
                 offset
             )
         }
-        let length = u64::try_from(bytes.len()).expect("分块大小应可转换为 u64");
+        let length = u64::try_from(bytes.len()).context("文件分块大小溢出")?;
         let next_size = file
             .received_size
             .checked_add(length)
@@ -479,12 +514,14 @@ impl IncomingTransfer {
         };
         handle.flush().context("刷新临时文件失败")?;
         drop(handle);
-        fs::rename(&file.temporary_path, &file.final_path).with_context(|| {
+        fs::hard_link(&file.temporary_path, &file.final_path).with_context(|| {
             format!(
-                "将临时文件重命名为最终文件失败：{}",
+                "将临时文件提交为最终文件失败：{}",
                 file.final_path.display()
             )
         })?;
+        fs::remove_file(&file.temporary_path)
+            .with_context(|| format!("清理临时文件失败：{}", file.temporary_path.display()))?;
         file.finished = true;
         Ok(())
     }
@@ -627,6 +664,10 @@ pub(super) fn path_collision_key(path: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+fn normalized_collision_key(path: &Path) -> Result<Vec<u8>> {
+    Ok(path_collision_key(&portable_relative_path(path)?))
+}
+
 fn portable_component(value: &[u8]) -> Vec<u8> {
     let mut result: Vec<u8> = value
         .iter()
@@ -656,8 +697,12 @@ fn portable_component(value: &[u8]) -> Vec<u8> {
         .iter()
         .map(|byte| byte.to_ascii_uppercase())
         .collect::<Vec<_>>();
+    let device_name_end = uppercase
+        .iter()
+        .position(|byte| *byte == b'.')
+        .unwrap_or(uppercase.len());
     let reserved = matches!(
-        uppercase.as_slice(),
+        &uppercase[..device_name_end],
         b"CON"
             | b"PRN"
             | b"AUX"
@@ -682,17 +727,9 @@ fn portable_component(value: &[u8]) -> Vec<u8> {
             | b"LPT9"
     );
     if reserved {
-        result.push(b'_');
+        result.insert(device_name_end, b'_');
     }
     result
-}
-
-fn path_to_wire(path: &Path) -> Vec<u8> {
-    portable_relative_path(path).unwrap_or_default()
-}
-
-fn path_from_wire(path: &[u8]) -> PathBuf {
-    safe_relative_path(path).unwrap_or_default()
 }
 
 fn path_display(path: &[u8]) -> String {
@@ -739,7 +776,9 @@ fn safe_component(value: &str) -> String {
 fn transfer_component(value: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
-    format!("{}-{:016x}", safe_component(value), hasher.finish())
+    let mut prefix = safe_component(value);
+    prefix.truncate(prefix.len().min(64));
+    format!("{prefix}-{:016x}", hasher.finish())
 }
 
 pub(super) fn cleanup_stale_cache() {

@@ -1,20 +1,22 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::{
     io::{self, Read, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, SyncSender, TrySendError},
+        mpsc::{self, SyncSender},
     },
     thread,
-    time::{Duration, Instant},
 };
 
 use super::{
-    FRAME_LIMIT, OUTGOING_QUEUE_SIZE, PEER_POLL_INTERVAL, PEER_SEND_TIMEOUT, PROTOCOL_VERSION,
-    WireMessage, format_bytes,
+    FRAME_LIMIT, IncomingEvent, MAX_PEERS, PEER_CONNECT_TIMEOUT, PEER_SEND_TIMEOUT,
+    PROTOCOL_VERSION, WireMessage, format_bytes,
 };
+
+const OUTGOING_QUEUE_SIZE: usize = 16;
+static NEXT_PEER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Clone, Default)]
 pub(super) struct PeerHub {
@@ -22,56 +24,85 @@ pub(super) struct PeerHub {
 }
 
 struct Peer {
+    peer_id: u64,
     sender: SyncSender<Arc<[u8]>>,
     alive: Arc<AtomicBool>,
 }
 
 impl PeerHub {
-    pub(super) fn add(&self, sender: SyncSender<Arc<[u8]>>, alive: Arc<AtomicBool>) {
-        let mut peers = self.peers.lock().expect("设备列表锁已损坏");
+    pub(super) fn add(
+        &self,
+        peer_id: u64,
+        sender: SyncSender<Arc<[u8]>>,
+        alive: Arc<AtomicBool>,
+    ) -> Result<bool> {
+        if !alive.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
         peers.retain(|peer| peer.alive.load(Ordering::Relaxed));
-        peers.push(Peer { sender, alive });
-    }
-
-    fn broadcast(&self, frame: Arc<[u8]>) -> usize {
-        let peers = self.peers.lock().expect("设备列表锁已损坏");
-        let targets = peers
-            .iter()
-            .filter(|peer| peer.alive.load(Ordering::Relaxed))
-            .map(|peer| (peer.sender.clone(), peer.alive.clone()))
-            .collect::<Vec<_>>();
-        drop(peers);
-
-        let sent = thread::scope(|scope| {
-            let handles = targets
-                .into_iter()
-                .map(|(sender, alive)| {
-                    let frame = frame.clone();
-                    scope.spawn(move || send_to_peer(&sender, &alive, frame))
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or(false))
-                .filter(|sent| *sent)
-                .count()
+        if peers.len() >= MAX_PEERS {
+            return Ok(false);
+        }
+        peers.push(Peer {
+            peer_id,
+            sender,
+            alive,
         });
-
-        self.peers
-            .lock()
-            .expect("设备列表锁已损坏")
-            .retain(|peer| peer.alive.load(Ordering::Relaxed));
-        sent
+        Ok(true)
     }
 
-    pub(super) fn send_message(&self, message: &WireMessage) -> Result<usize> {
-        let frame = encode_message(message)?;
-        Ok(self.broadcast(frame))
+    pub(super) fn active_peer_ids(&self) -> Result<Vec<u64>> {
+        let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
+        peers.retain(|peer| peer.alive.load(Ordering::Relaxed));
+        Ok(peers.iter().map(|peer| peer.peer_id).collect())
     }
 
-    pub(super) fn send_required(&self, message: &WireMessage) -> Result<()> {
-        if self.send_message(message)? == 0 {
+    fn remove(&self, peer_id: u64) -> Result<()> {
+        let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
+        peers.retain(|peer| peer.peer_id != peer_id);
+        Ok(())
+    }
+
+    pub(super) fn send_to_targets(&self, peer_ids: &[u64], message: &WireMessage) -> Result<()> {
+        if peer_ids.is_empty() {
             bail!("当前没有已连接的设备");
+        }
+        let frame = encode_message(message)?;
+        let targets = {
+            let peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
+            peer_ids
+                .iter()
+                .filter_map(|peer_id| {
+                    peers
+                        .iter()
+                        .find(|peer| peer.peer_id == *peer_id)
+                        .map(|peer| (peer.peer_id, peer.sender.clone(), peer.alive.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        if targets.len() != peer_ids.len() {
+            bail!("设备连接已关闭");
+        }
+
+        let mut failure = None;
+        for (peer_id, sender, alive) in targets {
+            if !alive.load(Ordering::Relaxed) {
+                failure = Some(format!("设备 {peer_id} 已关闭"));
+                continue;
+            }
+            match sender.send(frame.clone()) {
+                Ok(()) => {}
+                Err(_) => {
+                    alive.store(false, Ordering::Relaxed);
+                    failure = Some(format!("设备 {peer_id} 已关闭"));
+                }
+            }
+        }
+        let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
+        peers.retain(|peer| peer.alive.load(Ordering::Relaxed));
+        if let Some(error) = failure {
+            bail!("{error}");
         }
         Ok(())
     }
@@ -87,16 +118,12 @@ fn encode_message(message: &WireMessage) -> Result<Arc<[u8]>> {
     }
     Ok(Arc::from(frame.into_boxed_slice()))
 }
-pub(super) fn listen_loop(address: &SocketAddr, hub: PeerHub, incoming: SyncSender<WireMessage>) {
-    let listener = match TcpListener::bind(address) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("剪贴板同步：监听 {address} 失败：{error}");
-            return;
-        }
-    };
 
-    eprintln!("剪贴板同步：正在监听 {address}");
+pub(super) fn listen_loop(
+    listener: TcpListener,
+    hub: PeerHub,
+    incoming: SyncSender<IncomingEvent>,
+) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -108,73 +135,122 @@ pub(super) fn listen_loop(address: &SocketAddr, hub: PeerHub, incoming: SyncSend
     }
 }
 
-pub(super) fn connect_loop(address: &str, hub: PeerHub, incoming: SyncSender<WireMessage>) {
+pub(super) fn connect_loop(address: &str, hub: PeerHub, incoming: SyncSender<IncomingEvent>) {
     loop {
-        match TcpStream::connect(address) {
+        match connect_with_timeout(address) {
             Ok(stream) => {
                 eprintln!("剪贴板同步：已连接到 {address}");
                 let alive = register_connection(stream, hub.clone(), incoming.clone());
                 while alive.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(500));
+                    thread::sleep(std::time::Duration::from_millis(250));
                 }
                 eprintln!("剪贴板同步：与 {address} 的连接已关闭");
             }
             Err(error) => eprintln!("剪贴板同步：连接 {address} 失败：{error}"),
         }
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(std::time::Duration::from_secs(2));
     }
+}
+
+fn connect_with_timeout(address: &str) -> io::Result<TcpStream> {
+    connect_to_addresses(address.to_socket_addrs()?)
+}
+
+fn connect_to_addresses(addresses: impl IntoIterator<Item = SocketAddr>) -> io::Result<TcpStream> {
+    let mut last_error = None;
+    for target in addresses {
+        match TcpStream::connect_timeout(&target, PEER_CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "设备地址没有可用的解析结果",
+        )
+    }))
 }
 
 pub(super) fn register_connection(
     stream: TcpStream,
     hub: PeerHub,
-    incoming: SyncSender<WireMessage>,
+    incoming: SyncSender<IncomingEvent>,
 ) -> Arc<AtomicBool> {
     let (outgoing_tx, outgoing_rx) = mpsc::sync_channel::<Arc<[u8]>>(OUTGOING_QUEUE_SIZE);
-
+    let peer_id = NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed);
     let alive = Arc::new(AtomicBool::new(true));
-    let writer_alive = alive.clone();
-    let reader_alive = alive.clone();
-    let mut writer = stream.try_clone().expect("克隆设备连接失败");
-    let mut reader = stream;
 
+    let mut writer = match stream.try_clone() {
+        Ok(writer) => writer,
+        Err(error) => {
+            eprintln!("剪贴板同步：克隆设备连接失败：{error}");
+            alive.store(false, Ordering::Relaxed);
+            return alive;
+        }
+    };
+    let mut reader = stream;
     if let Err(error) = writer.set_write_timeout(Some(PEER_SEND_TIMEOUT)) {
         eprintln!("剪贴板同步：设置发送超时失败：{error}");
     }
     if let Err(error) = writer.set_nodelay(true) {
         eprintln!("剪贴板同步：启用低延迟发送失败：{error}");
     }
+    if let Err(error) = reader.set_read_timeout(Some(PEER_CONNECT_TIMEOUT)) {
+        eprintln!("剪贴板同步：设置握手超时失败：{error}");
+        alive.store(false, Ordering::Relaxed);
+        let _ = writer.shutdown(Shutdown::Both);
+        return alive;
+    }
 
-    let hello = encode_message(&WireMessage::Hello {
-        version: PROTOCOL_VERSION,
-    })
-    .expect("序列化握手消息失败");
-    outgoing_tx.send(hello).expect("发送握手消息失败");
-    hub.add(outgoing_tx, alive.clone());
-
+    let writer_alive = alive.clone();
     thread::spawn(move || {
         while writer_alive.load(Ordering::Relaxed) {
-            match outgoing_rx.recv_timeout(PEER_POLL_INTERVAL) {
-                Ok(frame) => {
-                    if let Err(error) = write_frame(&mut writer, &frame) {
-                        eprintln!("剪贴板同步：发送数据失败：{error}");
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            let Ok(frame) = outgoing_rx.recv() else { break };
+            if let Err(error) = write_frame(&mut writer, &frame) {
+                eprintln!("剪贴板同步：发送数据失败：{error}");
+                break;
             }
         }
         writer_alive.store(false, Ordering::Relaxed);
         let _ = writer.shutdown(Shutdown::Both);
     });
 
+    let hello = match encode_message(&WireMessage::Hello {
+        version: PROTOCOL_VERSION,
+    }) {
+        Ok(hello) => hello,
+        Err(error) => {
+            eprintln!("剪贴板同步：序列化握手消息失败：{error:#}");
+            alive.store(false, Ordering::Relaxed);
+            let _ = reader.shutdown(Shutdown::Both);
+            return alive;
+        }
+    };
+    if outgoing_tx.send(hello).is_err() {
+        eprintln!("剪贴板同步：发送握手消息失败");
+        alive.store(false, Ordering::Relaxed);
+        let _ = reader.shutdown(Shutdown::Both);
+        return alive;
+    }
+
+    let reader_alive = alive.clone();
+    let reader_hub = hub.clone();
     thread::spawn(move || {
         let mut handshaken = false;
         loop {
             let frame = match read_frame(&mut reader) {
                 Ok(Some(frame)) => frame,
                 Ok(None) => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    eprintln!("剪贴板同步：设备握手超时");
+                    break;
+                }
                 Err(error) => {
                     eprintln!("剪贴板同步：读取设备数据失败：{error}");
                     break;
@@ -189,14 +265,31 @@ pub(super) fn register_connection(
                         );
                         break;
                     }
-                    handshaken = true;
+                    if let Err(error) = reader.set_read_timeout(None) {
+                        eprintln!("剪贴板同步：设置接收超时失败：{error}");
+                        break;
+                    }
+                    match reader_hub.add(peer_id, outgoing_tx.clone(), reader_alive.clone()) {
+                        Ok(true) => handshaken = true,
+                        Ok(false) => {
+                            eprintln!("剪贴板同步：无法注册设备连接");
+                            break;
+                        }
+                        Err(error) => {
+                            eprintln!("剪贴板同步：注册设备连接失败：{error:#}");
+                            break;
+                        }
+                    }
                 }
                 Ok(WireMessage::Hello { .. }) => {
                     eprintln!("剪贴板同步：收到重复握手消息");
                     break;
                 }
                 Ok(message) if handshaken => {
-                    if incoming.send(message).is_err() {
+                    if incoming
+                        .send(IncomingEvent::Message { peer_id, message })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -210,39 +303,17 @@ pub(super) fn register_connection(
                 }
             }
         }
-
         reader_alive.store(false, Ordering::Relaxed);
+        if let Err(error) = reader_hub.remove(peer_id) {
+            eprintln!("剪贴板同步：清理设备连接失败：{error:#}");
+        }
         let _ = reader.shutdown(Shutdown::Both);
+        let _ = incoming.send(IncomingEvent::Disconnected { peer_id });
     });
 
     alive
 }
 
-fn send_to_peer(sender: &SyncSender<Arc<[u8]>>, alive: &Arc<AtomicBool>, frame: Arc<[u8]>) -> bool {
-    let deadline = Instant::now() + PEER_SEND_TIMEOUT;
-    let mut pending = frame;
-    loop {
-        if !alive.load(Ordering::Relaxed) {
-            return false;
-        }
-        match sender.try_send(pending) {
-            Ok(()) => return true,
-            Err(TrySendError::Disconnected(_)) => {
-                alive.store(false, Ordering::Relaxed);
-                return false;
-            }
-            Err(TrySendError::Full(frame)) => {
-                if Instant::now() >= deadline {
-                    eprintln!("剪贴板同步：设备发送队列持续拥塞，已断开设备");
-                    alive.store(false, Ordering::Relaxed);
-                    return false;
-                }
-                pending = frame;
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-}
 fn write_frame<W: Write>(stream: &mut W, frame: &[u8]) -> io::Result<()> {
     if frame.is_empty() || frame.len() > FRAME_LIMIT || frame.len() > u32::MAX as usize {
         return Err(io::Error::new(
@@ -250,10 +321,8 @@ fn write_frame<W: Write>(stream: &mut W, frame: &[u8]) -> io::Result<()> {
             "无效的数据帧大小",
         ));
     }
-
     stream.write_all(&(frame.len() as u32).to_be_bytes())?;
-    stream.write_all(frame)?;
-    stream.flush()
+    stream.write_all(frame)
 }
 
 fn read_frame<R: Read>(stream: &mut R) -> io::Result<Option<Vec<u8>>> {
@@ -263,7 +332,6 @@ fn read_frame<R: Read>(stream: &mut R) -> io::Result<Option<Vec<u8>>> {
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(error) => return Err(error),
     }
-
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > FRAME_LIMIT {
         return Err(io::Error::new(
@@ -271,7 +339,6 @@ fn read_frame<R: Read>(stream: &mut R) -> io::Result<Option<Vec<u8>>> {
             "收到无效的数据帧大小",
         ));
     }
-
     let mut frame = vec![0u8; length];
     stream.read_exact(&mut frame)?;
     Ok(Some(frame))
@@ -282,13 +349,24 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn wait_for_peers(hub: &PeerHub) -> Vec<u64> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let peers = hub.active_peer_ids().unwrap();
+            if !peers.is_empty() {
+                return peers;
+            }
+            assert!(std::time::Instant::now() < deadline, "等待设备握手超时");
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn frame_round_trip_preserves_bytes() {
         let mut encoded = Vec::new();
-        write_frame(&mut encoded, b"hello clipx").expect("写入测试帧失败");
-        let mut receiver = Cursor::new(encoded);
+        write_frame(&mut encoded, b"hello clipx").unwrap();
         assert_eq!(
-            read_frame(&mut receiver).expect("读取测试帧失败"),
+            read_frame(&mut Cursor::new(encoded)).unwrap(),
             Some(b"hello clipx".to_vec())
         );
     }
@@ -297,12 +375,44 @@ mod tests {
     fn frame_limits_reject_invalid_sizes() {
         let mut encoded = Vec::new();
         assert!(write_frame(&mut encoded, &[]).is_err());
+        encoded.extend_from_slice(&((FRAME_LIMIT as u32) + 1).to_be_bytes());
+        assert!(read_frame(&mut Cursor::new(encoded)).is_err());
+    }
 
-        encoded.clear();
-        encoded
-            .write_all(&((FRAME_LIMIT as u32) + 1).to_be_bytes())
-            .expect("写入无效帧头失败");
-        let mut receiver = Cursor::new(encoded);
-        assert!(read_frame(&mut receiver).is_err());
+    #[test]
+    fn tcp_connection_exchanges_message() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let connector = thread::spawn(move || TcpStream::connect(address).unwrap());
+        let (server_stream, _) = listener.accept().unwrap();
+        let client_stream = connector.join().unwrap();
+
+        let client_hub = PeerHub::default();
+        let server_hub = PeerHub::default();
+        let (client_events_tx, _client_events_rx) = mpsc::sync_channel(4);
+        let (server_events_tx, server_events_rx) = mpsc::sync_channel(4);
+        let client_alive = register_connection(client_stream, client_hub.clone(), client_events_tx);
+        let server_alive = register_connection(server_stream, server_hub.clone(), server_events_tx);
+
+        let peers = wait_for_peers(&client_hub);
+        client_hub
+            .send_to_targets(
+                &peers,
+                &WireMessage::Clipboard {
+                    id: "message".to_string(),
+                    payload: super::super::ClipboardPayload::Text("hello".to_string()),
+                },
+            )
+            .unwrap();
+        let IncomingEvent::Message { message, .. } = server_events_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+        else {
+            panic!("应收到客户端消息");
+        };
+        assert!(matches!(message, WireMessage::Clipboard { id, .. } if id == "message"));
+
+        client_alive.store(false, Ordering::Relaxed);
+        server_alive.store(false, Ordering::Relaxed);
     }
 }
