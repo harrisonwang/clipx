@@ -1,9 +1,15 @@
 [package]
 name = "clipx"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "跨设备剪贴板同步与文件复制工具"
 license = "MIT"
+default-run = "clipx"
+
+[features]
+default = ["tray", "gui"]
+tray = ["dep:tao", "dep:tray-icon"]
+gui = ["tray", "dep:wry"]
 
 [dependencies]
 anyhow = "1"
@@ -12,10 +18,18 @@ bincode = "1"
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+tao = { version = "0.34", optional = true }
+tray-icon = { version = "0.21", default-features = false, optional = true }
+wry = { version = "0.54", default-features = false, features = ["os-webview", "x11"], optional = true }
 
 [[bin]]
 name = "clipx"
 path = "src/main.rs"
+
+[[bin]]
+name = "clipx-gui"
+path = "src/bin/clipx-gui.rs"
+required-features = ["gui"]
 
 [patch.crates-io]
 arboard = { git = "https://github.com/harrisonwang/arboard.git", rev = "3a8ac4af91254af3a5ac8abca6bb3fc0b43470ef" }

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="clipx"
+      Manufacturer="Harrison Wang"
+      Version="$(var.Version)"
+      UpgradeCode="7C5D8D0C-3FC5-4E6D-9E41-6D5C0A9B8D58"
+      Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of clipx is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="clipx">
+      <ComponentGroupRef Id="ApplicationComponents" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="clipx" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="clipx" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="ApplicationComponents" Directory="INSTALLFOLDER">
+      <Component Id="GuiExecutableComponent" Guid="B5FE8E06-7F72-4C4C-A744-41EF7B99D719">
+        <File Id="ClipxGuiExe" Source="$(var.StageDir)\clipx-gui.exe" />
+      </Component>
+    </ComponentGroup>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="CE8A84AE-FBE6-4C8A-9E33-0B0D2C7A7D13">
+        <Shortcut
+            Id="ApplicationStartMenuShortcut"
+            Name="clipx"
+            Description="跨设备剪贴板同步"
+            Target="[#ClipxGuiExe]"
+            WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\clipx"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

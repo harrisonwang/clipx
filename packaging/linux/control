@@ -1,0 +1,9 @@
+Package: clipx-gui
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Harrison Wang <harrisonwang@users.noreply.github.com>
+Depends: libgtk-3-0, libwebkit2gtk-4.1-0, libappindicator3-1
+Description: Cross-device clipboard synchronization GUI
+ clipx synchronizes text, images, files, and directories across trusted LAN devices.

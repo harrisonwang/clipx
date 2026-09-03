@@ -185,43 +185,109 @@ impl SyncState {
     }
 }
 
-pub fn run(options: SyncOptions) -> Result<()> {
-    cleanup_stale_cache();
-
-    let hub = PeerHub::default();
-    let (incoming_tx, incoming_rx) = mpsc::sync_channel(INCOMING_QUEUE_SIZE);
-
-    if let Some(address) = options.listen {
-        let listener =
-            TcpListener::bind(address).with_context(|| format!("监听 {address} 失败"))?;
-        let bound_address = listener.local_addr().unwrap_or(address);
-        eprintln!("剪贴板同步：正在监听 {bound_address}");
-        let listener_hub = hub.clone();
-        let listener_incoming = incoming_tx.clone();
-        thread::spawn(move || listen_loop(listener, listener_hub, listener_incoming));
-    }
-
-    for address in options.connect {
-        let connector_hub = hub.clone();
-        let connector_incoming = incoming_tx.clone();
-        thread::spawn(move || connect_loop(&address, connector_hub, connector_incoming));
-    }
-    drop(incoming_tx);
-
-    eprintln!(
-        "剪贴板同步正在运行（clipx {}，协议 v{}）；未启用认证和加密",
-        env!("CARGO_PKG_VERSION"),
-        PROTOCOL_VERSION
-    );
-    clipboard_loop(incoming_rx, hub)
+pub struct SyncRuntime {
+    hub: PeerHub,
+    clipboard_thread: Option<thread::JoinHandle<Result<()>>>,
 }
 
-fn clipboard_loop(incoming: Receiver<IncomingEvent>, hub: PeerHub) -> Result<()> {
+impl SyncRuntime {
+    pub fn start(options: SyncOptions) -> Result<Self> {
+        cleanup_stale_cache();
+
+        let hub = PeerHub::default();
+        let (incoming_tx, incoming_rx) = mpsc::sync_channel(INCOMING_QUEUE_SIZE);
+
+        if let Some(address) = options.listen {
+            let listener =
+                TcpListener::bind(address).with_context(|| format!("监听 {address} 失败"))?;
+            let bound_address = listener.local_addr().unwrap_or(address);
+            eprintln!("剪贴板同步：正在监听 {bound_address}");
+            let listener_hub = hub.clone();
+            let listener_incoming = incoming_tx.clone();
+            thread::spawn(move || listen_loop(listener, listener_hub, listener_incoming));
+        }
+
+        if let Some(address) = options.connect {
+            let connector_hub = hub.clone();
+            let connector_incoming = incoming_tx.clone();
+            thread::spawn(move || connect_loop(&address, connector_hub, connector_incoming));
+        }
+
+        eprintln!(
+            "剪贴板同步正在运行（clipx {}，协议 v{}）；未启用认证和加密",
+            env!("CARGO_PKG_VERSION"),
+            PROTOCOL_VERSION
+        );
+
+        let clipboard_thread_hub = hub.clone();
+        let clipboard_thread =
+            thread::spawn(move || clipboard_loop(clipboard_thread_hub, incoming_rx));
+
+        Ok(Self {
+            hub,
+            clipboard_thread: Some(clipboard_thread),
+        })
+    }
+
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    pub fn peer_count(&self) -> usize {
+        self.hub
+            .active_peer_ids()
+            .map(|peers| peers.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    pub fn peer_addresses(&self) -> Vec<String> {
+        self.hub
+            .active_peer_addresses()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|address| address.to_string())
+            .collect()
+    }
+
+    pub fn stop(&self) {
+        self.hub.shutdown();
+    }
+
+    pub fn wait(mut self) -> Result<()> {
+        let result = match self
+            .clipboard_thread
+            .take()
+            .expect("同步线程已被等待")
+            .join()
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("剪贴板同步线程异常退出")),
+        };
+        self.stop();
+        result
+    }
+}
+
+impl Drop for SyncRuntime {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(thread) = self.clipboard_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub fn run(options: SyncOptions) -> Result<()> {
+    SyncRuntime::start(options)?.wait()
+}
+
+fn clipboard_loop(hub: PeerHub, incoming: Receiver<IncomingEvent>) -> Result<()> {
     let mut clipboard = Clipboard::new().context("访问系统剪贴板失败")?;
     let mut state = SyncState::new();
     let mut cache = CaptureCache::default();
 
     loop {
+        if hub.is_shutdown() {
+            return Ok(());
+        }
         while let Ok(event) = incoming.try_recv() {
             handle_incoming_event(event, &mut clipboard, &mut state);
         }

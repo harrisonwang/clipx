@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="110 90 806 806" role="img" aria-labelledby="title desc">
+  <title id="title">clipx tray icon</title>
+  <desc id="desc">Three white connection nodes and circular arrows on a transparent canvas.</desc>
+
+  <g fill="#fff">
+    <path d="M402 279C309 320 247 420 248 550c20-14 44-21 70-20-6-94 22-183 84-251Z"/>
+    <path d="M622 277c93 39 153 138 153 271-16-88-79-167-168-199 13-22 18-47 15-72Z"/>
+    <path d="M367 736c84 70 198 63 291 1l-46-51c-77 48-164 70-245 50Z"/>
+    <circle cx="513" cy="291" r="92"/>
+    <circle cx="315" cy="640" r="92"/>
+    <circle cx="714" cy="640" r="92"/>
+  </g>
+</svg>

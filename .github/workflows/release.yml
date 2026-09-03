@@ -14,7 +14,7 @@ jobs:
     name: validate release configuration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Validate required secrets
         if: github.ref_type == 'tag'
@@ -44,7 +44,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             exe_ext: ""
           - runner: windows-latest
@@ -58,7 +58,11 @@ jobs:
             exe_ext: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libappindicator3-dev libwebkit2gtk-4.1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -74,13 +78,26 @@ jobs:
         shell: bash
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+            version="dev-${GITHUB_SHA::7}"
           fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          bundle_version="${version#v}"
+          if [[ ! "$bundle_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            bundle_version="0.0.0"
+          fi
+          echo "BUNDLE_VERSION=$bundle_version" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.4
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Package and verify (tar.gz)
         if: runner.os != 'Windows'
@@ -91,11 +108,27 @@ jobs:
           rm -rf package out verify
           mkdir -p "package/clipx" out verify
           cp "target/${{ matrix.target }}/release/clipx${{ matrix.exe_ext }}" "package/clipx/"
+          cp "target/${{ matrix.target }}/release/clipx-gui${{ matrix.exe_ext }}" "package/clipx/"
           cp README.md "package/clipx/"
+          if [[ "${{ matrix.target }}" == *-unknown-linux-* ]]; then
+            mkdir -p "package/clipx/share/applications" "package/clipx/share/icons/hicolor/scalable/apps"
+            cp packaging/linux/clipx.desktop "package/clipx/share/applications/clipx.desktop"
+            cp assets/tray-icon.svg "package/clipx/share/icons/hicolor/scalable/apps/clipx.svg"
+          fi
+          if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
+            scripts/macos-app.sh \
+              "target/${{ matrix.target }}/release/clipx-gui" \
+              "package/clipx/clipx.app" \
+              "$BUNDLE_VERSION"
+          fi
           tar -C package -czf "out/${pkg}.tar.gz" clipx
           tar -xzf "out/${pkg}.tar.gz" -C verify
           test -x "verify/clipx/clipx${{ matrix.exe_ext }}"
+          test -x "verify/clipx/clipx-gui${{ matrix.exe_ext }}"
           "verify/clipx/clipx${{ matrix.exe_ext }}" --version
+          if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
+            test -x "verify/clipx/clipx.app/Contents/MacOS/clipx-gui"
+          fi
 
       - name: Package and verify (zip)
         if: runner.os == 'Windows'
@@ -108,10 +141,69 @@ jobs:
           New-Item -ItemType Directory -Force -Path package\clipx | Out-Null
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\clipx${{ matrix.exe_ext }}" "package\clipx\clipx${{ matrix.exe_ext }}"
+          Copy-Item "target\${{ matrix.target }}\release\clipx-gui${{ matrix.exe_ext }}" "package\clipx\clipx-gui${{ matrix.exe_ext }}"
           Copy-Item "README.md" "package\clipx\README.md"
           Compress-Archive -Path "package\clipx" -DestinationPath "out\$pkg.zip" -Force
           Expand-Archive -Path "out\$pkg.zip" -DestinationPath verify -Force
           & "verify\clipx\clipx${{ matrix.exe_ext }}" --version
+          if (-not (Test-Path "verify\clipx\clipx-gui${{ matrix.exe_ext }}")) { throw "clipx-gui binary missing" }
+
+      - name: Package and verify (dmg)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="out/clipx-gui_${VERSION}_${{ matrix.target }}.dmg"
+          scripts/macos-dmg.sh "package/clipx/clipx.app" "$dmg"
+          mount_point="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+            rm -rf "$mount_point"
+          }
+          trap cleanup EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+          test -x "$mount_point/clipx.app/Contents/MacOS/clipx-gui"
+          test -L "$mount_point/Applications"
+
+      - name: Package and verify (deb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="out/clipx-gui_${BUNDLE_VERSION}_amd64.deb"
+          scripts/linux-deb.sh \
+            "target/${{ matrix.target }}/release/clipx-gui" \
+            "$deb" \
+            "$BUNDLE_VERSION"
+          dpkg-deb --info "$deb" | grep -F "Package: clipx-gui"
+          dpkg-deb --info "$deb" | grep -F "Version: $BUNDLE_VERSION"
+          dpkg-deb --contents "$deb" | grep -F "./usr/bin/clipx-gui"
+          dpkg-deb --contents "$deb" | grep -F "./usr/share/applications/clipx.desktop"
+
+      - name: Package and verify (msi)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "msi-stage"
+          $verify = Join-Path $PWD "msi-verify"
+          Remove-Item -Recurse -Force $stage, $verify -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage, $verify | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\clipx-gui${{ matrix.exe_ext }}" "$stage\clipx-gui${{ matrix.exe_ext }}"
+
+          $msi = "out\clipx-gui_${env:VERSION}_${{ matrix.target }}.msi"
+          wix build "packaging\windows\clipx.wxs" `
+            -arch x64 `
+            -d "StageDir=$stage" `
+            -d "Version=$env:BUNDLE_VERSION" `
+            -o $msi
+          if (-not (Test-Path $msi)) { throw "MSI artifact missing" }
+
+          $arguments = "/a `"$((Resolve-Path $msi).Path)`" /qn /norestart TARGETDIR=`"$verify`""
+          $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Administrative MSI install failed: $($process.ExitCode)" }
+          if (-not (Get-ChildItem $verify -Filter "clipx-gui${{ matrix.exe_ext }}" -Recurse -File)) {
+            throw "MSI does not contain clipx-gui"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -120,6 +212,9 @@ jobs:
           path: |
             out/*.tar.gz
             out/*.zip
+            out/*.dmg
+            out/*.deb
+            out/*.msi
 
   publish:
     if: github.ref_type == 'tag'
@@ -139,7 +234,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          files=( *.zip *.tar.gz )
+          files=( *.zip *.tar.gz *.dmg *.deb *.msi )
           if ((${#files[@]} == 0)); then
             echo "no artifacts found" >&2
             exit 1

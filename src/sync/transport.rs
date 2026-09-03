@@ -8,6 +8,7 @@ use std::{
         mpsc::{self, SyncSender},
     },
     thread,
+    time::Duration,
 };
 
 use super::{
@@ -18,23 +19,37 @@ use super::{
 const OUTGOING_QUEUE_SIZE: usize = 16;
 static NEXT_PEER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(super) struct PeerHub {
     peers: Arc<Mutex<Vec<Peer>>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Default for PeerHub {
+    fn default() -> Self {
+        Self {
+            peers: Arc::new(Mutex::new(Vec::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 struct Peer {
     peer_id: u64,
+    address: SocketAddr,
     sender: SyncSender<Arc<[u8]>>,
     alive: Arc<AtomicBool>,
+    stream: Arc<Mutex<TcpStream>>,
 }
 
 impl PeerHub {
     pub(super) fn add(
         &self,
         peer_id: u64,
+        address: SocketAddr,
         sender: SyncSender<Arc<[u8]>>,
         alive: Arc<AtomicBool>,
+        stream: Arc<Mutex<TcpStream>>,
     ) -> Result<bool> {
         if !alive.load(Ordering::Relaxed) {
             return Ok(false);
@@ -46,8 +61,10 @@ impl PeerHub {
         }
         peers.push(Peer {
             peer_id,
+            address,
             sender,
             alive,
+            stream,
         });
         Ok(true)
     }
@@ -56,6 +73,29 @@ impl PeerHub {
         let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
         peers.retain(|peer| peer.alive.load(Ordering::Relaxed));
         Ok(peers.iter().map(|peer| peer.peer_id).collect())
+    }
+
+    pub(super) fn active_peer_addresses(&self) -> Result<Vec<SocketAddr>> {
+        let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
+        peers.retain(|peer| peer.alive.load(Ordering::Relaxed));
+        Ok(peers.iter().map(|peer| peer.address).collect())
+    }
+
+    pub(super) fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let peers = self.peers.lock().expect("设备列表锁已损坏");
+        for peer in peers.iter() {
+            peer.alive.store(false, Ordering::Release);
+            let _ = peer
+                .stream
+                .lock()
+                .expect("设备连接锁已损坏")
+                .shutdown(Shutdown::Both);
+        }
+    }
+
+    pub(super) fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
     }
 
     fn remove(&self, peer_id: u64) -> Result<()> {
@@ -124,11 +164,23 @@ pub(super) fn listen_loop(
     hub: PeerHub,
     incoming: SyncSender<IncomingEvent>,
 ) {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    if let Err(error) = listener.set_nonblocking(true) {
+        eprintln!("剪贴板同步：设置监听非阻塞失败：{error}");
+        return;
+    }
+
+    while !hub.is_shutdown() {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if let Err(error) = stream.set_nonblocking(false) {
+                    eprintln!("剪贴板同步：设置设备连接为阻塞模式失败：{error}");
+                    continue;
+                }
                 eprintln!("剪贴板同步：设备已连接 {:?}", stream.peer_addr());
                 register_connection(stream, hub.clone(), incoming.clone());
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
             }
             Err(error) => eprintln!("剪贴板同步：接受连接失败：{error}"),
         }
@@ -136,19 +188,24 @@ pub(super) fn listen_loop(
 }
 
 pub(super) fn connect_loop(address: &str, hub: PeerHub, incoming: SyncSender<IncomingEvent>) {
-    loop {
+    while !hub.is_shutdown() {
         match connect_with_timeout(address) {
             Ok(stream) => {
                 eprintln!("剪贴板同步：已连接到 {address}");
                 let alive = register_connection(stream, hub.clone(), incoming.clone());
-                while alive.load(Ordering::Relaxed) {
+                while alive.load(Ordering::Relaxed) && !hub.is_shutdown() {
                     thread::sleep(std::time::Duration::from_millis(250));
                 }
                 eprintln!("剪贴板同步：与 {address} 的连接已关闭");
             }
             Err(error) => eprintln!("剪贴板同步：连接 {address} 失败：{error}"),
         }
-        thread::sleep(std::time::Duration::from_secs(2));
+        for _ in 0..20 {
+            if hub.is_shutdown() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -177,9 +234,20 @@ pub(super) fn register_connection(
     hub: PeerHub,
     incoming: SyncSender<IncomingEvent>,
 ) -> Arc<AtomicBool> {
+    let address = stream
+        .peer_addr()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
     let (outgoing_tx, outgoing_rx) = mpsc::sync_channel::<Arc<[u8]>>(OUTGOING_QUEUE_SIZE);
     let peer_id = NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed);
     let alive = Arc::new(AtomicBool::new(true));
+    let stream_for_shutdown = match stream.try_clone() {
+        Ok(stream) => Arc::new(Mutex::new(stream)),
+        Err(error) => {
+            eprintln!("剪贴板同步：克隆设备连接失败：{error}");
+            alive.store(false, Ordering::Relaxed);
+            return alive;
+        }
+    };
 
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
@@ -269,7 +337,13 @@ pub(super) fn register_connection(
                         eprintln!("剪贴板同步：设置接收超时失败：{error}");
                         break;
                     }
-                    match reader_hub.add(peer_id, outgoing_tx.clone(), reader_alive.clone()) {
+                    match reader_hub.add(
+                        peer_id,
+                        address,
+                        outgoing_tx.clone(),
+                        reader_alive.clone(),
+                        stream_for_shutdown.clone(),
+                    ) {
                         Ok(true) => handshaken = true,
                         Ok(false) => {
                             eprintln!("剪贴板同步：无法注册设备连接");

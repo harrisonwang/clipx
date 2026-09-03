@@ -9,10 +9,11 @@ pub(crate) enum Command {
     Sync(SyncOptions),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SyncOptions {
     pub(crate) listen: Option<SocketAddr>,
-    pub(crate) connect: Vec<String>,
+    pub(crate) connect: Option<String>,
+    pub(crate) tray: bool,
 }
 
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command> {
@@ -49,7 +50,8 @@ fn parse_copy(args: impl Iterator<Item = OsString>) -> Result<Command> {
 
 fn parse_sync(mut args: impl Iterator<Item = OsString>) -> Result<Command> {
     let mut listen = None;
-    let mut connect = Vec::new();
+    let mut connect = None;
+    let mut tray = false;
 
     while let Some(argument) = args.next() {
         match argument.to_str() {
@@ -69,6 +71,9 @@ fn parse_sync(mut args: impl Iterator<Item = OsString>) -> Result<Command> {
                 );
             }
             Some("--connect") => {
+                if connect.is_some() {
+                    bail!("--connect 只能指定一次")
+                }
                 let value = args
                     .next()
                     .context("--connect 需要地址，例如 192.168.1.20:45876")?;
@@ -78,17 +83,27 @@ fn parse_sync(mut args: impl Iterator<Item = OsString>) -> Result<Command> {
                 if value.is_empty() {
                     bail!("--connect 地址不能为空")
                 }
-                connect.push(value);
+                connect = Some(value);
+            }
+            Some("--tray") => {
+                tray = true;
             }
             Some(unknown) => bail!("未知的同步参数：{unknown}\n\n{}", usage()),
             None => bail!("同步参数必须是有效的 UTF-8\n\n{}", usage()),
         }
     }
 
-    if listen.is_none() && connect.is_empty() {
+    if listen.is_none() && connect.is_none() {
         bail!("sync 至少需要 --listen 或 --connect\n\n{}", usage())
     }
-    Ok(Command::Sync(SyncOptions { listen, connect }))
+    if listen.is_some() && connect.is_some() {
+        bail!("--listen 和 --connect 不能同时使用")
+    }
+    Ok(Command::Sync(SyncOptions {
+        listen,
+        connect,
+        tray,
+    }))
 }
 
 fn is_help(argument: &OsString) -> bool {
@@ -96,7 +111,7 @@ fn is_help(argument: &OsString) -> bool {
 }
 
 pub(crate) fn usage() -> &'static str {
-    "用法：\n  clipx copy <文件或目录路径>...\n  clipx sync [--listen <地址>] [--connect <地址>]...\n  clipx --help\n  clipx --version"
+    "用法：\n  clipx copy <文件或目录路径>...\n  clipx sync [--tray] [--listen <地址>] [--connect <地址>]...\n  clipx --help\n  clipx --version"
 }
 
 #[cfg(test)]
@@ -125,13 +140,51 @@ mod tests {
     }
 
     #[test]
-    fn sync_accepts_multiple_connect_targets() {
+    fn sync_accepts_single_connect_target() {
+        let command = parse(strings(&["sync", "--connect", "mac.local:45876"])).unwrap();
+        assert_eq!(
+            command,
+            Command::Sync(SyncOptions {
+                listen: None,
+                connect: Some("mac.local:45876".to_string()),
+                tray: false,
+            })
+        );
+    }
+
+    #[test]
+    fn duplicate_connect_is_rejected() {
+        assert!(
+            parse(strings(&[
+                "sync",
+                "--connect",
+                "mac.local:45876",
+                "--connect",
+                "192.168.1.20:45876",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn listen_and_connect_are_rejected_together() {
+        assert!(
+            parse(strings(&[
+                "sync",
+                "--listen",
+                "0.0.0.0:45876",
+                "--connect",
+                "192.168.1.20:45876",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sync_accepts_tray_mode() {
         let command = parse(strings(&[
             "sync",
-            "--listen",
-            "0.0.0.0:45876",
-            "--connect",
-            "mac.local:45876",
+            "--tray",
             "--connect",
             "192.168.1.20:45876",
         ]))
@@ -139,11 +192,9 @@ mod tests {
         assert_eq!(
             command,
             Command::Sync(SyncOptions {
-                listen: Some("0.0.0.0:45876".parse().unwrap()),
-                connect: vec![
-                    "mac.local:45876".to_string(),
-                    "192.168.1.20:45876".to_string(),
-                ],
+                listen: None,
+                connect: Some("192.168.1.20:45876".to_string()),
+                tray: true,
             })
         );
     }

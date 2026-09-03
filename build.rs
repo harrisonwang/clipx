@@ -9,10 +9,12 @@ fn main() {
         let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("缺少项目目录"))
             .join("windows")
             .join("app.manifest");
-        println!("cargo:rustc-link-arg-bin=clipx=/MANIFEST:EMBED");
-        println!(
-            "cargo:rustc-link-arg-bin=clipx=/MANIFESTINPUT:{}",
-            manifest.display()
-        );
+        for binary in ["clipx", "clipx-gui"] {
+            println!("cargo:rustc-link-arg-bin={binary}=/MANIFEST:EMBED");
+            println!(
+                "cargo:rustc-link-arg-bin={binary}=/MANIFESTINPUT:{}",
+                manifest.display()
+            );
+        }
     }
 }

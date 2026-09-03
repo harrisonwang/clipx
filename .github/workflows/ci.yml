@@ -13,9 +13,12 @@ permissions:
 jobs:
   lint:
     name: fmt + clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Install Linux desktop dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libappindicator3-dev libwebkit2gtk-4.1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,6 +31,12 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: Validate distribution templates
+        run: |
+          python3 -m json.tool .github/scoop/clipx.json.tmpl > /dev/null
+          test -f .github/homebrew/formula.rb.tmpl
+          test -f .github/homebrew/cask.rb.tmpl
+
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
@@ -38,11 +47,15 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
+          - ubuntu-22.04
           - windows-latest
           - macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Install Linux desktop dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libappindicator3-dev libwebkit2gtk-4.1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

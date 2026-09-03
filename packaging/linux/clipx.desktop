@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=clipx
+Comment=跨设备剪贴板同步
+Exec=clipx-gui
+Icon=clipx
+Terminal=false
+Categories=Utility;
+StartupNotify=false

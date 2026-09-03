@@ -1,0 +1,19 @@
+cask "{{TOOL}}-gui" do
+  version "{{VERSION}}"
+  name "clipx"
+  desc "Cross-device clipboard synchronization"
+  homepage "https://github.com/{{REPO}}"
+  license "MIT"
+
+  on_arm do
+    url "{{BASE_URL}}/{{TOOL}}-gui_{{TAG}}_aarch64-apple-darwin.dmg"
+    sha256 "{{SHA256:{{TOOL}}-gui_{{TAG}}_aarch64-apple-darwin.dmg}}"
+  end
+
+  on_intel do
+    url "{{BASE_URL}}/{{TOOL}}-gui_{{TAG}}_x86_64-apple-darwin.dmg"
+    sha256 "{{SHA256:{{TOOL}}-gui_{{TAG}}_x86_64-apple-darwin.dmg}}"
+  end
+
+  app "clipx.app"
+end
