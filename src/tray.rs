@@ -1,4 +1,9 @@
 use crate::{cli::SyncOptions, sync::SyncRuntime};
+#[cfg(feature = "gui")]
+use crate::{
+    config::{self, DesktopConfig, DesktopRole},
+    gui::{PairingPanel, PanelRequest},
+};
 #[cfg(target_os = "linux")]
 use anyhow::bail;
 use anyhow::{Context, Result, anyhow};
@@ -18,7 +23,7 @@ use tray_icon::{
 };
 
 #[cfg(feature = "gui")]
-use crate::gui::PairingPanel;
+use std::sync::mpsc;
 
 const EXIT_MENU_ID: &str = "exit";
 #[cfg(feature = "gui")]
@@ -29,10 +34,11 @@ pub(crate) fn run(options: SyncOptions) -> Result<()> {
     require_graphical_session()?;
 
     #[cfg(feature = "gui")]
-    let panel_listen_address = options.listen.map(|address| address.to_string());
+    let mut config = DesktopConfig::from_sync_options(&options)?;
     #[cfg(feature = "gui")]
-    let panel_connect_target = options.connect.clone();
-    let runtime = SyncRuntime::start(options)?;
+    let (panel_request_tx, panel_request_rx) = mpsc::channel::<PanelRequest>();
+    #[allow(unused_mut)]
+    let mut runtime = Some(SyncRuntime::start(options)?);
     let mut event_loop = EventLoop::new();
     let menu = Menu::new();
     let status_item = MenuItem::with_id("status", "剪贴板同步运行中", false, None);
@@ -79,7 +85,7 @@ pub(crate) fn run(options: SyncOptions) -> Result<()> {
                     }
                     Err(error) => {
                         tray_error = Some(format!("创建托盘图标失败：{error}"));
-                        runtime.stop();
+                        runtime.as_ref().expect("同步运行时应存在").stop();
                         *control_flow = ControlFlow::Exit;
                     }
                 }
@@ -99,12 +105,10 @@ pub(crate) fn run(options: SyncOptions) -> Result<()> {
                 }
             }
             Event::MainEventsCleared => {
-                status_item.set_text(format!("已连接 {} 台设备", runtime.peer_count()));
-
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     if *event.id() == exit_id {
                         eprintln!("剪贴板同步：正在退出");
-                        runtime.stop();
+                        runtime.as_ref().expect("同步运行时应存在").stop();
                         *control_flow = ControlFlow::Exit;
                         break;
                     }
@@ -116,8 +120,8 @@ pub(crate) fn run(options: SyncOptions) -> Result<()> {
                         } else {
                             match PairingPanel::new(
                                 _event_loop_target,
-                                panel_listen_address.clone(),
-                                panel_connect_target.clone(),
+                                &config,
+                                panel_request_tx.clone(),
                             ) {
                                 Ok(new_panel) => {
                                     new_panel.show();
@@ -130,8 +134,46 @@ pub(crate) fn run(options: SyncOptions) -> Result<()> {
                 }
 
                 #[cfg(feature = "gui")]
+                while let Ok(request) = panel_request_rx.try_recv() {
+                    match request {
+                        PanelRequest::Disconnect => {
+                            runtime.as_ref().expect("同步运行时应存在").disconnect();
+                        }
+                        PanelRequest::Reconnect => {
+                            runtime.as_ref().expect("同步运行时应存在").reconnect();
+                        }
+                        PanelRequest::SaveConfig { role, address } => {
+                            match DesktopConfig::from_form(role, &address)
+                                .and_then(|next| apply_config(&mut config, &mut runtime, next))
+                            {
+                                Ok(()) => {
+                                    if let Some(panel) = panel.as_mut() {
+                                        panel.set_config(&config);
+                                        panel.set_message("设置已应用");
+                                    }
+                                }
+                                Err(error) => {
+                                    if let Some(panel) = panel.as_ref() {
+                                        panel.set_message(&format!("设置未应用：{error:#}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let active_runtime = runtime.as_ref().expect("同步运行时应存在");
+                #[cfg(feature = "gui")]
+                let status_text = tray_status_text(&config, active_runtime);
+                #[cfg(not(feature = "gui"))]
+                let status_text = format!("已连接 {} 台设备", active_runtime.peer_count());
+                status_item.set_text(status_text);
+
+                #[cfg(feature = "gui")]
                 if let Some(panel) = panel.as_mut() {
-                    panel.set_peer_addresses(&runtime.peer_addresses());
+                    panel.set_peer_addresses(&active_runtime.peer_addresses());
+                    let (status, action) = runtime_state(&config, active_runtime);
+                    panel.set_runtime_state(status, action);
                 }
             }
             _ => {}
@@ -143,6 +185,77 @@ pub(crate) fn run(options: SyncOptions) -> Result<()> {
     #[cfg(feature = "gui")]
     drop(panel);
     tray_error.map_or(Ok(()), |error| Err(anyhow!(error)))
+}
+
+#[cfg(feature = "gui")]
+fn apply_config(
+    current_config: &mut DesktopConfig,
+    runtime: &mut Option<SyncRuntime>,
+    next_config: DesktopConfig,
+) -> Result<()> {
+    if *current_config == next_config {
+        return Ok(());
+    }
+
+    let previous_config = current_config.clone();
+    let old_runtime = runtime.take().context("应用连接设置时同步运行时不存在")?;
+    old_runtime.stop();
+    drop(old_runtime);
+
+    let new_runtime = match SyncRuntime::start(next_config.sync_options()) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            *runtime = Some(
+                SyncRuntime::start(previous_config.sync_options())
+                    .context("应用新连接设置失败，恢复旧设置也失败")?,
+            );
+            return Err(error).context("应用新连接设置失败");
+        }
+    };
+
+    if let Err(error) = config::save(&next_config) {
+        drop(new_runtime);
+        *runtime = Some(
+            SyncRuntime::start(previous_config.sync_options())
+                .context("保存新设置失败，恢复旧设置也失败")?,
+        );
+        return Err(error).context("保存新连接设置失败");
+    }
+
+    *current_config = next_config;
+    *runtime = Some(new_runtime);
+    Ok(())
+}
+
+#[cfg(feature = "gui")]
+fn runtime_state(
+    config: &DesktopConfig,
+    runtime: &SyncRuntime,
+) -> (&'static str, Option<&'static str>) {
+    if matches!(config.role, DesktopRole::Listen) {
+        return ("运行中", None);
+    }
+
+    if !runtime.connection_enabled() {
+        ("已断开", Some("reconnect"))
+    } else if runtime.peer_count() > 0 {
+        ("已连接", Some("disconnect"))
+    } else {
+        ("正在连接", Some("disconnect"))
+    }
+}
+
+#[cfg(feature = "gui")]
+fn tray_status_text(config: &DesktopConfig, runtime: &SyncRuntime) -> String {
+    if matches!(config.role, DesktopRole::Listen) {
+        format!("已连接 {} 台设备", runtime.peer_count())
+    } else if !runtime.connection_enabled() {
+        "连接已断开".to_string()
+    } else if runtime.peer_count() > 0 {
+        "已连接".to_string()
+    } else {
+        "正在连接".to_string()
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -22,10 +22,10 @@ mkdir -p \
   "$stage/DEBIAN" \
   "$stage/usr/bin" \
   "$stage/usr/share/applications" \
-  "$stage/usr/share/icons/hicolor/scalable/apps"
+  "$stage/usr/share/icons/hicolor/512x512/apps"
 cp "$binary_path" "$stage/usr/bin/clipx-gui"
 cp "$repo_root/packaging/linux/clipx.desktop" "$stage/usr/share/applications/clipx.desktop"
-cp "$repo_root/assets/tray-icon.svg" "$stage/usr/share/icons/hicolor/scalable/apps/clipx.svg"
+cp "$repo_root/assets/clipx.png" "$stage/usr/share/icons/hicolor/512x512/apps/clipx.png"
 sed "s/@VERSION@/$version/g" "$repo_root/packaging/linux/control" > "$stage/DEBIAN/control"
 
 mkdir -p "$(dirname "$output_path")"

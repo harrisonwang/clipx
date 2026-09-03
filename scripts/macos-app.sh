@@ -14,6 +14,7 @@ fi
 rm -rf "$app_path"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_path" "$app_path/Contents/MacOS/clipx-gui"
+cp "$repo_root/assets/clipx.icns" "$app_path/Contents/Resources/clipx.icns"
 sed "s/@VERSION@/$version/g" "$repo_root/packaging/macos/Info.plist" \
   > "$app_path/Contents/Info.plist"
 

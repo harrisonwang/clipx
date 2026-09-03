@@ -23,6 +23,15 @@ pub(crate) struct DesktopConfig {
 }
 
 impl DesktopConfig {
+    pub(crate) fn from_sync_options(options: &SyncOptions) -> Result<Self> {
+        match (&options.listen, &options.connect) {
+            (Some(address), None) => Self::from_form(DesktopRole::Listen, &address.to_string()),
+            (None, Some(address)) => Self::from_form(DesktopRole::Connect, address),
+            (Some(_), Some(_)) => bail!("--listen 和 --connect 不能同时使用"),
+            (None, None) => bail!("同步模式需要监听地址或连接目标"),
+        }
+    }
+
     pub(crate) fn from_form(role: DesktopRole, address: &str) -> Result<Self> {
         let address = address.trim();
         if address.is_empty() || address.contains(['\n', '\r', '=']) {

@@ -25,6 +25,36 @@ pub(super) struct PeerHub {
     shutdown: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
+pub(super) struct ConnectControl {
+    enabled: Arc<AtomicBool>,
+}
+
+impl Default for ConnectControl {
+    fn default() -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+impl ConnectControl {
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(super) fn pause(&self) {
+        self.enabled.store(false, Ordering::Release);
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(super) fn resume(&self) {
+        self.enabled.store(true, Ordering::Release);
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(super) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+}
+
 impl Default for PeerHub {
     fn default() -> Self {
         Self {
@@ -36,6 +66,7 @@ impl Default for PeerHub {
 
 struct Peer {
     peer_id: u64,
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     address: SocketAddr,
     sender: SyncSender<Arc<[u8]>>,
     alive: Arc<AtomicBool>,
@@ -75,6 +106,7 @@ impl PeerHub {
         Ok(peers.iter().map(|peer| peer.peer_id).collect())
     }
 
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub(super) fn active_peer_addresses(&self) -> Result<Vec<SocketAddr>> {
         let mut peers = self.peers.lock().map_err(|_| anyhow!("设备列表锁已损坏"))?;
         peers.retain(|peer| peer.alive.load(Ordering::Relaxed));
@@ -83,6 +115,10 @@ impl PeerHub {
 
     pub(super) fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.disconnect_all();
+    }
+
+    pub(super) fn disconnect_all(&self) {
         let peers = self.peers.lock().expect("设备列表锁已损坏");
         for peer in peers.iter() {
             peer.alive.store(false, Ordering::Release);
@@ -187,13 +223,25 @@ pub(super) fn listen_loop(
     }
 }
 
-pub(super) fn connect_loop(address: &str, hub: PeerHub, incoming: SyncSender<IncomingEvent>) {
+pub(super) fn connect_loop(
+    address: &str,
+    hub: PeerHub,
+    incoming: SyncSender<IncomingEvent>,
+    control: ConnectControl,
+) {
     while !hub.is_shutdown() {
+        if !control.is_enabled() {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         match connect_with_timeout(address) {
             Ok(stream) => {
                 eprintln!("剪贴板同步：已连接到 {address}");
                 let alive = register_connection(stream, hub.clone(), incoming.clone());
-                while alive.load(Ordering::Relaxed) && !hub.is_shutdown() {
+                if !control.is_enabled() {
+                    hub.disconnect_all();
+                }
+                while alive.load(Ordering::Relaxed) && control.is_enabled() && !hub.is_shutdown() {
                     thread::sleep(std::time::Duration::from_millis(250));
                 }
                 eprintln!("剪贴板同步：与 {address} 的连接已关闭");
@@ -201,7 +249,7 @@ pub(super) fn connect_loop(address: &str, hub: PeerHub, incoming: SyncSender<Inc
             Err(error) => eprintln!("剪贴板同步：连接 {address} 失败：{error}"),
         }
         for _ in 0..20 {
-            if hub.is_shutdown() {
+            if hub.is_shutdown() || !control.is_enabled() {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
@@ -454,6 +502,60 @@ mod tests {
     }
 
     #[test]
+    fn connect_control_can_pause_and_resume_without_shutdown() {
+        let control = ConnectControl::default();
+        assert!(control.is_enabled());
+        control.pause();
+        assert!(!control.is_enabled());
+        control.resume();
+        assert!(control.is_enabled());
+    }
+
+    #[test]
+    fn connect_loop_does_not_retry_after_controlled_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let connector_hub = PeerHub::default();
+        let server_hub = PeerHub::default();
+        let control = ConnectControl::default();
+        let (connector_events_tx, _connector_events_rx) = mpsc::sync_channel(4);
+        let (server_events_tx, _server_events_rx) = mpsc::sync_channel(4);
+        let connect_address = address.to_string();
+        let connector_thread = {
+            let connector_hub = connector_hub.clone();
+            let control = control.clone();
+            thread::spawn(move || {
+                connect_loop(
+                    &connect_address,
+                    connector_hub,
+                    connector_events_tx,
+                    control,
+                )
+            })
+        };
+
+        let (server_stream, _) = listener.accept().unwrap();
+        let server_alive = register_connection(server_stream, server_hub.clone(), server_events_tx);
+        wait_for_peers(&connector_hub);
+
+        control.pause();
+        connector_hub.disconnect_all();
+        assert!(connector_hub.active_peer_ids().unwrap().is_empty());
+
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(250));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+
+        connector_hub.shutdown();
+        server_hub.shutdown();
+        server_alive.store(false, Ordering::Relaxed);
+        connector_thread.join().unwrap();
+    }
+
+    #[test]
     fn tcp_connection_exchanges_message() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -486,6 +588,8 @@ mod tests {
         };
         assert!(matches!(message, WireMessage::Clipboard { id, .. } if id == "message"));
 
+        client_hub.disconnect_all();
+        assert!(client_hub.active_peer_ids().unwrap().is_empty());
         client_alive.store(false, Ordering::Relaxed);
         server_alive.store(false, Ordering::Relaxed);
     }

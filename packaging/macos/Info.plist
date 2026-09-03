@@ -6,6 +6,8 @@
   <string>clipx</string>
   <key>CFBundleExecutable</key>
   <string>clipx-gui</string>
+  <key>CFBundleIconFile</key>
+  <string>clipx</string>
   <key>CFBundleIdentifier</key>
   <string>com.harrisonwang.clipx</string>
   <key>CFBundleInfoDictionaryVersion</key>

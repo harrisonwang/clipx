@@ -26,6 +26,8 @@
   </Fragment>
 
   <Fragment>
+    <Icon Id="ClipxIcon" SourceFile="$(var.IconPath)" />
+
     <ComponentGroup Id="ApplicationComponents" Directory="INSTALLFOLDER">
       <Component Id="GuiExecutableComponent" Guid="B5FE8E06-7F72-4C4C-A744-41EF7B99D719">
         <File Id="ClipxGuiExe" Source="$(var.StageDir)\clipx-gui.exe" />
@@ -39,6 +41,7 @@
             Name="clipx"
             Description="跨设备剪贴板同步"
             Target="[#ClipxGuiExe]"
+            Icon="ClipxIcon"
             WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
         <RegistryValue

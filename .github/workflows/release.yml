@@ -111,9 +111,9 @@ jobs:
           cp "target/${{ matrix.target }}/release/clipx-gui${{ matrix.exe_ext }}" "package/clipx/"
           cp README.md "package/clipx/"
           if [[ "${{ matrix.target }}" == *-unknown-linux-* ]]; then
-            mkdir -p "package/clipx/share/applications" "package/clipx/share/icons/hicolor/scalable/apps"
+            mkdir -p "package/clipx/share/applications" "package/clipx/share/icons/hicolor/512x512/apps"
             cp packaging/linux/clipx.desktop "package/clipx/share/applications/clipx.desktop"
-            cp assets/tray-icon.svg "package/clipx/share/icons/hicolor/scalable/apps/clipx.svg"
+            cp assets/clipx.png "package/clipx/share/icons/hicolor/512x512/apps/clipx.png"
           fi
           if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
             scripts/macos-app.sh \
@@ -128,6 +128,7 @@ jobs:
           "verify/clipx/clipx${{ matrix.exe_ext }}" --version
           if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
             test -x "verify/clipx/clipx.app/Contents/MacOS/clipx-gui"
+            test -f "verify/clipx/clipx.app/Contents/Resources/clipx.icns"
           fi
 
       - name: Package and verify (zip)
@@ -179,6 +180,7 @@ jobs:
           dpkg-deb --info "$deb" | grep -F "Version: $BUNDLE_VERSION"
           dpkg-deb --contents "$deb" | grep -F "./usr/bin/clipx-gui"
           dpkg-deb --contents "$deb" | grep -F "./usr/share/applications/clipx.desktop"
+          dpkg-deb --contents "$deb" | grep -F "./usr/share/icons/hicolor/512x512/apps/clipx.png"
 
       - name: Package and verify (msi)
         if: runner.os == 'Windows'
@@ -189,11 +191,13 @@ jobs:
           Remove-Item -Recurse -Force $stage, $verify -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $stage, $verify | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\clipx-gui${{ matrix.exe_ext }}" "$stage\clipx-gui${{ matrix.exe_ext }}"
+          Copy-Item "assets\clipx.ico" "$stage\clipx.ico"
 
           $msi = "out\clipx-gui_${env:VERSION}_${{ matrix.target }}.msi"
           wix build "packaging\windows\clipx.wxs" `
             -arch x64 `
             -d "StageDir=$stage" `
+            -d "IconPath=$stage\clipx.ico" `
             -d "Version=$env:BUNDLE_VERSION" `
             -o $msi
           if (-not (Test-Path $msi)) { throw "MSI artifact missing" }

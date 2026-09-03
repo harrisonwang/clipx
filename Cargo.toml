@@ -1,6 +1,6 @@
 [package]
 name = "clipx"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "跨设备剪贴板同步与文件复制工具"
 license = "MIT"
@@ -21,6 +21,9 @@ sha2 = "0.10"
 tao = { version = "0.34", optional = true }
 tray-icon = { version = "0.21", default-features = false, optional = true }
 wry = { version = "0.54", default-features = false, features = ["os-webview", "x11"], optional = true }
+
+[build-dependencies]
+embed-resource = "3.0.11"
 
 [[bin]]
 name = "clipx"

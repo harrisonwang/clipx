@@ -46,7 +46,7 @@ use files::{
 use image::{
     CachedImage, CapturedImage, IncomingImage, apply_image, capture_image, send_image_transfer,
 };
-use transport::{PeerHub, connect_loop, listen_loop};
+use transport::{ConnectControl, PeerHub, connect_loop, listen_loop};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ClipboardPayload {
@@ -187,7 +187,10 @@ impl SyncState {
 
 pub struct SyncRuntime {
     hub: PeerHub,
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    connector: Option<ConnectControl>,
     clipboard_thread: Option<thread::JoinHandle<Result<()>>>,
+    network_threads: Vec<thread::JoinHandle<()>>,
 }
 
 impl SyncRuntime {
@@ -196,6 +199,8 @@ impl SyncRuntime {
 
         let hub = PeerHub::default();
         let (incoming_tx, incoming_rx) = mpsc::sync_channel(INCOMING_QUEUE_SIZE);
+        let connector = options.connect.as_ref().map(|_| ConnectControl::default());
+        let mut network_threads = Vec::new();
 
         if let Some(address) = options.listen {
             let listener =
@@ -204,13 +209,25 @@ impl SyncRuntime {
             eprintln!("剪贴板同步：正在监听 {bound_address}");
             let listener_hub = hub.clone();
             let listener_incoming = incoming_tx.clone();
-            thread::spawn(move || listen_loop(listener, listener_hub, listener_incoming));
+            network_threads.push(thread::spawn(move || {
+                listen_loop(listener, listener_hub, listener_incoming)
+            }));
         }
 
         if let Some(address) = options.connect {
             let connector_hub = hub.clone();
             let connector_incoming = incoming_tx.clone();
-            thread::spawn(move || connect_loop(&address, connector_hub, connector_incoming));
+            let connector_control = connector
+                .clone()
+                .expect("连接端配置存在时必须创建连接控制器");
+            network_threads.push(thread::spawn(move || {
+                connect_loop(
+                    &address,
+                    connector_hub,
+                    connector_incoming,
+                    connector_control,
+                )
+            }));
         }
 
         eprintln!(
@@ -225,7 +242,9 @@ impl SyncRuntime {
 
         Ok(Self {
             hub,
+            connector,
             clipboard_thread: Some(clipboard_thread),
+            network_threads,
         })
     }
 
@@ -238,6 +257,7 @@ impl SyncRuntime {
     }
 
     #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub fn peer_addresses(&self) -> Vec<String> {
         self.hub
             .active_peer_addresses()
@@ -245,6 +265,28 @@ impl SyncRuntime {
             .into_iter()
             .map(|address| address.to_string())
             .collect()
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn connection_enabled(&self) -> bool {
+        self.connector
+            .as_ref()
+            .is_none_or(ConnectControl::is_enabled)
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn disconnect(&self) {
+        if let Some(connector) = &self.connector {
+            connector.pause();
+        }
+        self.hub.disconnect_all();
+    }
+
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn reconnect(&self) {
+        if let Some(connector) = &self.connector {
+            connector.resume();
+        }
     }
 
     pub fn stop(&self) {
@@ -262,7 +304,14 @@ impl SyncRuntime {
             Err(_) => Err(anyhow::anyhow!("剪贴板同步线程异常退出")),
         };
         self.stop();
+        self.join_network_threads();
         result
+    }
+
+    fn join_network_threads(&mut self) {
+        while let Some(thread) = self.network_threads.pop() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -272,6 +321,7 @@ impl Drop for SyncRuntime {
         if let Some(thread) = self.clipboard_thread.take() {
             let _ = thread.join();
         }
+        self.join_network_threads();
     }
 }
 
