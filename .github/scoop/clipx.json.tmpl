@@ -5,9 +5,14 @@
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "{{BASE_URL}}/{{TOOL}}_{{TAG}}_x86_64-pc-windows-msvc.zip",
-      "hash": "{{SHA256:{{TOOL}}_{{TAG}}_x86_64-pc-windows-msvc.zip}}",
-      "extract_dir": "clipx"
+      "url": [
+        "{{BASE_URL}}/{{TOOL}}_{{TAG}}_x86_64-pc-windows-msvc.exe#/clipx.exe",
+        "{{BASE_URL}}/{{TOOL}}-gui_{{TAG}}_x86_64-pc-windows-msvc.exe#/clipx-gui.exe"
+      ],
+      "hash": [
+        "{{SHA256:{{TOOL}}_{{TAG}}_x86_64-pc-windows-msvc.exe}}",
+        "{{SHA256:{{TOOL}}-gui_{{TAG}}_x86_64-pc-windows-msvc.exe}}"
+      ]
     }
   },
   "bin": [
@@ -26,7 +31,10 @@
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/{{REPO}}/releases/download/v$version/{{TOOL}}_v$version_x86_64-pc-windows-msvc.zip"
+        "url": [
+          "https://github.com/{{REPO}}/releases/download/v$version/{{TOOL}}_v$version_x86_64-pc-windows-msvc.exe#/clipx.exe",
+          "https://github.com/{{REPO}}/releases/download/v$version/{{TOOL}}-gui_v$version_x86_64-pc-windows-msvc.exe#/clipx-gui.exe"
+        ]
       }
     },
     "hash": {

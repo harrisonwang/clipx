@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>clipx</string>
+  <key>CFBundleExecutable</key>
+  <string>clipx-gui</string>
+  <key>CFBundleIconFile</key>
+  <string>clipx</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.harrisonwang.clipx</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>clipx</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>10.15</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>clipx 需要发现并连接同一局域网内的设备，配对后加密同步剪贴板。</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_clipx._tcp</string>
+  </array>
+</dict>
+</plist>
