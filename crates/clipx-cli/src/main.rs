@@ -87,9 +87,7 @@ fn sync(options: SyncOptions, code: Option<String>, device: Option<String>) -> R
         eprintln!("正在配对…");
         wait_for_pairing(&runtime)?;
     } else if runtime.snapshot().devices.is_empty() {
-        let code = runtime.generate_code()?;
-        println!("配对码：{code}\n在另一台设备运行：clipx --pair {code}");
-        eprintln!("配对码两分钟内有效。配对成功后自动开始同步。");
+        runtime.generate_code()?;
         wait_for_pairing(&runtime)?;
     }
     eprintln!("同步已启动。按 Ctrl+C 退出。");
@@ -97,11 +95,26 @@ fn sync(options: SyncOptions, code: Option<String>, device: Option<String>) -> R
 }
 
 fn wait_for_pairing(runtime: &SyncRuntime) -> Result<()> {
+    let mut shown_code = None;
     loop {
         let state = runtime.snapshot();
         if state.paired {
             runtime.cancel_pairing();
             return Ok(());
+        }
+        if let Some(code) = state.code.as_deref()
+            && shown_code.as_deref() != Some(code)
+        {
+            let heading = if shown_code.is_some() {
+                "配对码已更新"
+            } else {
+                "配对码"
+            };
+            println!("{heading}：{code}\n在另一台设备运行：clipx --pair {code}");
+            if shown_code.is_none() {
+                eprintln!("配对码两分钟内有效。配对成功后自动开始同步。");
+            }
+            shown_code = Some(code.to_owned());
         }
         if let Some(error) = state.error {
             bail!("{error}");

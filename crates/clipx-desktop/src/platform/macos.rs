@@ -1,4 +1,4 @@
-use crate::app::{Action, AppEvent, PANEL_WIDTH, Page, PanelState};
+use crate::app::{Action, AppEvent, PANEL_WIDTH, Page, PanelState, can_pair, normalize_code};
 use anyhow::Result;
 use clipx_core::DeviceId;
 use objc2::{
@@ -8,115 +8,85 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSColor, NSControl, NSControlTextEditingDelegate, NSFont, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSPopUpButton, NSStatusItem, NSTextAlignment, NSTextField, NSTextFieldDelegate,
-    NSTextView, NSView,
+    NSAlert, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSFont,
+    NSPopUpButton, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming,
-    NSObjectProtocol, NSPoint, NSRect, NSRunLoopCommonModes, NSSize, NSString,
+    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use std::cell::{Cell, RefCell};
-use tao::event_loop::{EventLoopProxy, EventLoopWindowTarget};
-use tray_icon::menu::{ContextMenu, Menu};
+use tao::{
+    dpi::LogicalSize,
+    event_loop::{EventLoopProxy, EventLoopWindowTarget},
+    platform::macos::WindowExtMacOS,
+    window::{Window, WindowBuilder},
+};
+use tray_icon::menu::{Menu, PredefinedMenuItem, Submenu};
 
 struct Callbacks {
     proxy: EventLoopProxy<AppEvent>,
     actions: RefCell<Vec<Action>>,
     input: RefCell<Option<Retained<NSTextField>>>,
     picker: RefCell<Option<Retained<NSPopUpButton>>>,
+    pair: RefCell<Option<Retained<NSButton>>>,
     nearby: RefCell<Vec<DeviceId>>,
     submitting: Cell<bool>,
-    opened: Cell<bool>,
-    opening: Cell<bool>,
 }
 
 define_class!(
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
     #[ivars = Callbacks]
-    struct MenuCallbacks;
+    struct PanelCallbacks;
 
-    unsafe impl NSObjectProtocol for MenuCallbacks {}
-    unsafe impl NSMenuDelegate for MenuCallbacks {
-        #[unsafe(method(menuWillOpen:))]
-        fn will_open(&self, _: &NSMenu) {
-            self.ivars().opened.set(true);
-            self.ivars().opening.set(false);
-            let _ = self.ivars().proxy.send_event(AppEvent::Action(Action::MenuOpened));
-            self.schedule_focus();
-        }
-
-        #[unsafe(method(menuDidClose:))]
-        fn did_close(&self, _: &NSMenu) {
-            self.ivars().opened.set(false);
-            let _ = self.ivars().proxy.send_event(AppEvent::Action(Action::Hide));
-        }
-    }
-    unsafe impl NSControlTextEditingDelegate for MenuCallbacks {
+    unsafe impl NSObjectProtocol for PanelCallbacks {}
+    unsafe impl NSControlTextEditingDelegate for PanelCallbacks {
         #[unsafe(method(controlTextDidChange:))]
-        fn text_changed(&self, _: &NSNotification) { self.submit(); }
+        fn text_changed(&self, _: &NSNotification) { self.changed(); }
 
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self, _: &NSControl, _: &NSTextView, command: Sel) -> bool {
             if command == sel!(cancelOperation:) {
-                let _ = self.ivars().proxy.send_event(AppEvent::Action(Action::Hide));
+                self.send(Action::Hide);
                 true
             } else { false }
         }
     }
-    unsafe impl NSTextFieldDelegate for MenuCallbacks {}
+    unsafe impl NSTextFieldDelegate for PanelCallbacks {}
 
-    impl MenuCallbacks {
-        #[unsafe(method(performMenu:))]
-        fn perform_menu(&self, item: &NSMenuItem) {
-            if let Some(action) = self.ivars().actions.borrow().get(item.tag() as usize) {
-                let _ = self.ivars().proxy.send_event(AppEvent::Action(action.clone()));
+    impl PanelCallbacks {
+        #[unsafe(method(performAction:))]
+        fn perform_action(&self, button: &NSButton) {
+            if let Some(action) = self.ivars().actions.borrow().get(button.tag() as usize) {
+                self.send(action.clone());
             }
         }
 
         #[unsafe(method(submitCode:))]
         fn submit_code(&self, _: &NSControl) { self.submit(); }
 
-        #[unsafe(method(focusInput:))]
-        fn focus_input(&self, _: Option<&NSObject>) {
-            if !self.ivars().opened.get() { return; }
-            if let Some(input) = self.ivars().input.borrow().as_ref()
-                && let Some(window) = input.window() {
-                window.makeKeyWindow();
-                window.makeFirstResponder(Some(input));
-            }
-        }
+        #[unsafe(method(selectionChanged:))]
+        fn selection_changed(&self, _: &NSControl) { self.changed(); }
     }
 );
 
-impl MenuCallbacks {
+impl PanelCallbacks {
     fn new(proxy: EventLoopProxy<AppEvent>, mtm: MainThreadMarker) -> Retained<Self> {
         let value = Self::alloc(mtm).set_ivars(Callbacks {
             proxy,
             actions: RefCell::new(Vec::new()),
             input: RefCell::new(None),
             picker: RefCell::new(None),
+            pair: RefCell::new(None),
             nearby: RefCell::new(Vec::new()),
             submitting: Cell::new(false),
-            opened: Cell::new(false),
-            opening: Cell::new(false),
         });
         // NSObject has no additional initialization requirements.
         unsafe { msg_send![super(value), init] }
     }
 
-    fn schedule_focus(&self) {
-        // The menu's window exists after menuWillOpen returns. Common modes also
-        // run while AppKit is tracking the menu.
-        unsafe {
-            self.performSelector_withObject_afterDelay_inModes(
-                sel!(focusInput:),
-                None,
-                0.0,
-                &NSArray::from_slice(&[NSRunLoopCommonModes]),
-            );
-        }
+    fn send(&self, action: Action) {
+        let _ = self.ivars().proxy.send_event(AppEvent::Action(action));
     }
 
     fn selected(&self) -> Option<DeviceId> {
@@ -132,253 +102,288 @@ impl MenuCallbacks {
         }
     }
 
-    fn submit(&self) {
+    fn changed(&self) {
         let fields = self.ivars().input.borrow();
-        let Some(input) = fields.as_ref() else {
-            return;
-        };
-        if self.ivars().submitting.get() {
-            return;
-        }
+        let Some(input) = fields.as_ref() else { return };
         let original = input.stringValue().to_string();
-        let code: String = original
-            .chars()
-            .filter(char::is_ascii_digit)
-            .take(6)
-            .collect();
+        let code = normalize_code(&original);
         if code != original {
             input.setStringValue(&NSString::from_str(&code));
         }
-        if code.len() != 6 {
+        if let Some(pair) = self.ivars().pair.borrow().as_ref() {
+            pair.setEnabled(
+                !self.ivars().submitting.get()
+                    && can_pair(&code, &self.ivars().nearby.borrow(), self.selected()),
+            );
+        }
+    }
+
+    fn submit(&self) {
+        if self.ivars().submitting.get() {
             return;
         }
-        self.ivars().submitting.set(true);
-        let _ = self
-            .ivars()
-            .proxy
-            .send_event(AppEvent::Action(Action::Join(code, self.selected())));
+        let fields = self.ivars().input.borrow();
+        let Some(input) = fields.as_ref() else { return };
+        let code = normalize_code(&input.stringValue().to_string());
+        let selected = self.selected();
+        if can_pair(&code, &self.ivars().nearby.borrow(), selected) {
+            self.ivars().submitting.set(true);
+            self.send(Action::Join(code, selected));
+        }
     }
 }
 
+fn panel_height(state: &PanelState) -> f64 {
+    let base = if state.page == Page::Waiting {
+        260.0
+    } else {
+        196.0
+    };
+    base + if state.page == Page::Pair && state.snapshot.nearby.len() > 1 {
+        72.0
+    } else {
+        0.0
+    } + if state.message().is_some() { 54.0 } else { 0.0 }
+}
+
 pub struct Panel {
-    menu: Menu,
-    native: Retained<NSMenu>,
-    callbacks: Retained<MenuCallbacks>,
-    status_item: Option<Retained<NSStatusItem>>,
-    error: Option<(Retained<NSMenuItem>, Retained<NSTextField>)>,
+    window: Window,
+    _shortcuts: Menu,
+    root: Retained<NSView>,
+    callbacks: Retained<PanelCallbacks>,
+    generate: Option<Retained<NSButton>>,
     code: Option<Retained<NSTextField>>,
-    remaining: Option<Retained<NSMenuItem>>,
-    generate: Option<Retained<NSMenuItem>>,
+    remaining: Option<Retained<NSTextField>>,
+    error: Option<Retained<NSTextField>>,
     previous: Option<PanelState>,
+    visible: bool,
 }
 
 impl Panel {
     pub fn new(
-        _: &EventLoopWindowTarget<AppEvent>,
+        target: &EventLoopWindowTarget<AppEvent>,
         proxy: EventLoopProxy<AppEvent>,
     ) -> Result<Self> {
         let mtm = MainThreadMarker::new().expect("AppKit 需要主线程");
-        let menu = Menu::new();
-        // Muda owns this NSMenu; retain it while attaching our native items and delegate.
-        let native = unsafe { Retained::retain(menu.ns_menu().cast::<NSMenu>()) }
-            .expect("Muda 创建原生菜单");
-        native.setAutoenablesItems(false);
-        native.setMinimumWidth(PANEL_WIDTH);
-        let callbacks = MenuCallbacks::new(proxy, mtm);
-        native.setDelegate(Some(ProtocolObject::from_ref(&*callbacks)));
-        let mut panel = Self {
-            menu,
-            native,
-            callbacks,
-            status_item: None,
-            error: None,
+        // AppKit routes standard text-editing shortcuts through the application menu.
+        let shortcuts = Menu::with_items(&[
+            &Submenu::with_items(
+                "clipx",
+                true,
+                &[&PredefinedMenuItem::quit(Some("退出 clipx"))],
+            )?,
+            &Submenu::with_items(
+                "编辑",
+                true,
+                &[
+                    &PredefinedMenuItem::cut(Some("剪切")),
+                    &PredefinedMenuItem::copy(Some("拷贝")),
+                    &PredefinedMenuItem::paste(Some("粘贴")),
+                    &PredefinedMenuItem::select_all(Some("全选")),
+                ],
+            )?,
+        ])?;
+        shortcuts.init_for_nsapp();
+        let window = WindowBuilder::new()
+            .with_title("添加设备")
+            .with_inner_size(LogicalSize::new(PANEL_WIDTH, 196.0))
+            .with_resizable(false)
+            .with_minimizable(false)
+            .with_maximizable(false)
+            .with_visible(false)
+            .build(target)?;
+        let root = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, 196.0)),
+        );
+        // Keep Tao's content view and event handling; native controls live in a child view.
+        unsafe { &*window.ns_view().cast::<NSView>() }.addSubview(&root);
+        Ok(Self {
+            window,
+            _shortcuts: shortcuts,
+            root,
+            callbacks: PanelCallbacks::new(proxy, mtm),
+            generate: None,
             code: None,
             remaining: None,
-            generate: None,
+            error: None,
             previous: None,
-        };
-        panel.update(&PanelState::default());
-        Ok(panel)
+            visible: false,
+        })
     }
 
-    pub fn menu(&self) -> Menu {
-        self.menu.clone()
+    fn bounds(&self, x: f64, y: f64, width: f64, height: f64) -> NSRect {
+        NSRect::new(
+            NSPoint::new(x, self.root.frame().size.height - y - height),
+            NSSize::new(width, height),
+        )
     }
 
-    pub fn bind_tray(&mut self, item: Retained<NSStatusItem>) {
-        self.status_item = Some(item);
-    }
-
-    fn item(&self, menu: &NSMenu, title: &str, action: Option<Action>) -> Retained<NSMenuItem> {
-        let item = NSMenuItem::new(self.callbacks.mtm());
-        item.setTitle(&NSString::from_str(title));
-        item.setEnabled(action.is_some());
-        if let Some(action) = action {
-            let mut actions = self.callbacks.ivars().actions.borrow_mut();
-            item.setTag(actions.len() as isize);
-            actions.push(action);
-            // Panel retains the target until after all native items are removed.
-            unsafe {
-                item.setTarget(Some(&self.callbacks));
-                item.setAction(Some(sel!(performMenu:)));
-            }
-        }
-        menu.addItem(&item);
-        item
-    }
-
-    fn view(&self, height: f64) -> (Retained<NSMenuItem>, Retained<NSView>) {
-        let view = NSView::initWithFrame(
-            NSView::alloc(self.callbacks.mtm()),
-            NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, height)),
-        );
-        let item = NSMenuItem::new(self.callbacks.mtm());
-        item.setView(Some(&view));
-        self.native.addItem(&item);
-        (item, view)
-    }
-
-    fn label(&self, parent: &NSView, text: &str, size: f64) -> Retained<NSTextField> {
-        let label = NSTextField::labelWithString(&NSString::from_str(text), self.callbacks.mtm());
-        label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 4.0),
-            NSSize::new(PANEL_WIDTH - 28.0, parent.frame().size.height - 8.0),
-        ));
-        label.setFont(Some(&NSFont::systemFontOfSize(size)));
-        label.setMaximumNumberOfLines(2);
-        parent.addSubview(&label);
+    fn label(&self, text: &str, y: f64, height: f64) -> Retained<NSTextField> {
+        let label =
+            NSTextField::wrappingLabelWithString(&NSString::from_str(text), self.callbacks.mtm());
+        label.setFrame(self.bounds(24.0, y, PANEL_WIDTH - 48.0, height));
+        label.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        self.root.addSubview(&label);
         label
     }
 
+    fn button(
+        &self,
+        title: &str,
+        action: Option<Action>,
+        x: f64,
+        width: f64,
+    ) -> Retained<NSButton> {
+        // Panel retains the target while its controls are alive.
+        let button = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(title),
+                Some(&self.callbacks),
+                Some(if action.is_some() {
+                    sel!(performAction:)
+                } else {
+                    sel!(submitCode:)
+                }),
+                self.callbacks.mtm(),
+            )
+        };
+        if let Some(action) = action {
+            let mut actions = self.callbacks.ivars().actions.borrow_mut();
+            button.setTag(actions.len() as isize);
+            actions.push(action);
+        }
+        button.setFrame(self.bounds(x, self.root.frame().size.height - 44.0, width, 28.0));
+        self.root.addSubview(&button);
+        button
+    }
+
     fn rebuild(&mut self, state: &PanelState) {
-        self.native.removeAllItems();
-        self.callbacks.ivars().actions.borrow_mut().clear();
+        let mtm = self.callbacks.mtm();
+        if let Some(window) = self.root.window() {
+            window.makeFirstResponder(None);
+        }
+        for child in self.root.subviews() {
+            child.removeFromSuperview();
+        }
         self.callbacks.ivars().input.replace(None);
         self.callbacks.ivars().picker.replace(None);
+        self.callbacks.ivars().pair.replace(None);
+        self.callbacks.ivars().actions.borrow_mut().clear();
         self.callbacks
             .ivars()
             .nearby
-            .replace(state.snapshot.nearby.iter().map(|peer| peer.id).collect());
+            .replace(state.snapshot.nearby.iter().map(|p| p.id).collect());
+        self.generate = None;
         self.code = None;
         self.remaining = None;
-        self.generate = None;
-        let mtm = self.callbacks.mtm();
-        self.item(&self.native, &state.title(), None);
-        self.native.addItem(&NSMenuItem::separatorItem(mtm));
-        match state.page {
-            Page::Pair => {
-                self.generate = Some(self.item(&self.native, "生成配对码", Some(Action::Generate)));
-                let (_, view) = self.view(38.0);
-                let input = NSTextField::initWithFrame(
-                    NSTextField::alloc(mtm),
-                    NSRect::new(
-                        NSPoint::new(14.0, 8.0),
-                        NSSize::new(PANEL_WIDTH - 28.0, 24.0),
-                    ),
+        self.error = None;
+        let height = panel_height(state);
+        self.window
+            .set_inner_size(LogicalSize::new(PANEL_WIDTH, height));
+        self.root
+            .setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, height)));
+        let separator = NSBox::initWithFrame(
+            NSBox::alloc(mtm),
+            self.bounds(0.0, height - 60.0, PANEL_WIDTH, 1.0),
+        );
+        separator.setBoxType(NSBoxType::Separator);
+        self.root.addSubview(&separator);
+
+        if state.page == Page::Waiting {
+            self.label("本机配对码", 24.0, 20.0);
+            self.label("在另一台设备上输入此码。", 52.0, 20.0);
+            let code = self.label("", 88.0, 44.0);
+            code.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
+                30.0, 0.0,
+            )));
+            code.setAlignment(NSTextAlignment::Center);
+            code.setSelectable(true);
+            self.code = Some(code);
+            let remaining = self.label("", 140.0, 18.0);
+            remaining.setAlignment(NSTextAlignment::Center);
+            remaining.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            self.remaining = Some(remaining);
+            self.label("关闭窗口后仍可配对。", 170.0, 18.0)
+                .setTextColor(Some(&NSColor::secondaryLabelColor()));
+            self.button("取消配对", Some(Action::Cancel), 20.0, 96.0);
+        } else {
+            self.label("输入另一台设备上显示的配对码。", 24.0, 20.0);
+            let mut y = 64.0;
+            if state.snapshot.nearby.len() > 1 {
+                self.label("设备", y, 18.0);
+                let picker = NSPopUpButton::initWithFrame_pullsDown(
+                    NSPopUpButton::alloc(mtm),
+                    self.bounds(20.0, y + 24.0, PANEL_WIDTH - 40.0, 26.0),
+                    false,
                 );
-                input.setPlaceholderString(Some(&NSString::from_str("或输入 6 位配对码")));
-                input.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
-                    13.0, 0.0,
-                )));
+                picker.addItemWithTitle(&NSString::from_str("选择设备"));
+                for device in &state.snapshot.nearby {
+                    picker.addItemWithTitle(&NSString::from_str(&state.nearby_name(device)));
+                }
                 unsafe {
-                    input.setDelegate(Some(ProtocolObject::from_ref(&*self.callbacks)));
-                    input.setTarget(Some(&self.callbacks));
-                    input.setAction(Some(sel!(submitCode:)));
+                    picker.setTarget(Some(&self.callbacks));
+                    picker.setAction(Some(sel!(selectionChanged:)));
                 }
-                view.addSubview(&input);
-                self.callbacks.ivars().input.replace(Some(input));
-                if state.snapshot.nearby.len() > 1 {
-                    let (_, view) = self.view(30.0);
-                    let picker = NSPopUpButton::initWithFrame_pullsDown(
-                        NSPopUpButton::alloc(mtm),
-                        NSRect::new(
-                            NSPoint::new(10.0, 3.0),
-                            NSSize::new(PANEL_WIDTH - 20.0, 24.0),
-                        ),
-                        false,
-                    );
-                    picker.addItemWithTitle(&NSString::from_str("选择设备"));
-                    for device in &state.snapshot.nearby {
-                        picker.addItemWithTitle(&NSString::from_str(&state.nearby_name(device)));
-                    }
-                    unsafe {
-                        picker.setTarget(Some(&self.callbacks));
-                        picker.setAction(Some(sel!(submitCode:)));
-                    }
-                    view.addSubview(&picker);
-                    self.callbacks.ivars().picker.replace(Some(picker));
-                }
-                if !state.snapshot.devices.is_empty() {
-                    self.item(&self.native, "返回设备列表", Some(Action::Cancel));
-                }
+                self.root.addSubview(&picker);
+                self.callbacks.ivars().picker.replace(Some(picker));
+                y += 72.0;
             }
-            Page::Waiting => {
-                let (_, view) = self.view(36.0);
-                let code = self.label(&view, "", 20.0);
-                code.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
-                    20.0, 0.0,
-                )));
-                code.setAlignment(NSTextAlignment::Center);
-                code.setSelectable(true);
-                self.code = Some(code);
-                self.remaining = Some(self.item(&self.native, "正在生成…", None));
-                self.generate =
-                    Some(self.item(&self.native, "重新生成配对码", Some(Action::Generate)));
-                self.item(&self.native, "取消配对", Some(Action::Cancel));
+            self.label("配对码", y, 18.0);
+            let input = NSTextField::initWithFrame(
+                NSTextField::alloc(mtm),
+                self.bounds(24.0, y + 24.0, PANEL_WIDTH - 48.0, 28.0),
+            );
+            input.setPlaceholderString(Some(&NSString::from_str("6 位数字")));
+            input.setFont(Some(&NSFont::systemFontOfSize(16.0)));
+            unsafe {
+                input.setDelegate(Some(ProtocolObject::from_ref(&*self.callbacks)));
+                input.setTarget(Some(&self.callbacks));
+                input.setAction(Some(sel!(submitCode:)));
             }
-            Page::Devices => {
-                for device in &state.snapshot.devices {
-                    let item = self.item(
-                        &self.native,
-                        &format!(
-                            "{} · {}",
-                            device.name,
-                            if device.connected { "在线" } else { "离线" }
-                        ),
-                        None,
-                    );
-                    let submenu = NSMenu::new(mtm);
-                    submenu.setAutoenablesItems(false);
-                    self.item(&submenu, "移除设备…", Some(Action::Remove(device.id)));
-                    item.setSubmenu(Some(&submenu));
-                    item.setEnabled(true);
-                }
-                self.item(&self.native, "添加设备…", Some(Action::Add));
-            }
+            self.root.addSubview(&input);
+            self.callbacks.ivars().input.replace(Some(input));
+            self.generate = Some(self.button("本机配对码…", Some(Action::Generate), 20.0, 116.0));
+            let pair = self.button("配对", None, 280.0, 68.0);
+            pair.setKeyEquivalent(&NSString::from_str("\r"));
+            self.callbacks.ivars().pair.replace(Some(pair));
         }
-        let (item, view) = self.view(36.0);
-        let error = self.label(&view, "", 11.0);
-        item.setHidden(true);
-        self.error = Some((item, error));
-        self.native.addItem(&NSMenuItem::separatorItem(mtm));
-        self.item(&self.native, "退出", Some(Action::Quit));
+        let close_x = if state.page == Page::Waiting {
+            280.0
+        } else {
+            204.0
+        };
+        let close = self.button("关闭", Some(Action::Hide), close_x, 68.0);
+        close.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+        if state.message().is_some() {
+            self.error = Some(self.label("", height - 106.0, 42.0));
+        }
     }
 
     pub fn update(&mut self, state: &PanelState) {
         let rebuild = self.previous.as_ref().is_none_or(|old| {
             old.page != state.page
-                || (state.page == Page::Devices && old.snapshot.devices != state.snapshot.devices)
+                || panel_height(old) != panel_height(state)
                 || (state.page == Page::Pair && old.snapshot.nearby != state.snapshot.nearby)
         });
         if rebuild {
             let selected = self.callbacks.selected();
-            let text = self
+            let input = self
                 .callbacks
                 .ivars()
                 .input
                 .borrow()
                 .as_ref()
                 .map(|input| input.stringValue());
-            self.callbacks.ivars().submitting.set(true);
+            let keep_input = !state.snapshot.paired
+                && self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|old| old.page == Page::Pair && state.page == Page::Pair);
             self.rebuild(state);
-            if self
-                .previous
-                .as_ref()
-                .is_some_and(|old| old.page == Page::Pair)
-                && state.page == Page::Pair
-            {
+            if keep_input {
                 if let (Some(text), Some(input)) =
-                    (text, self.callbacks.ivars().input.borrow().as_ref())
+                    (input, self.callbacks.ivars().input.borrow().as_ref())
                 {
                     input.setStringValue(&text);
                 }
@@ -392,100 +397,67 @@ impl Panel {
                     picker.selectItemAtIndex(index as isize + 1);
                 }
             }
-            if self.callbacks.ivars().opened.get() {
-                self.callbacks.schedule_focus();
+            if self.visible {
+                self.focus_input();
             }
         }
         self.callbacks
             .ivars()
             .submitting
-            .set(state.snapshot.joining);
+            .set(state.snapshot.joining.is_some());
         if let Some(input) = self.callbacks.ivars().input.borrow().as_ref() {
-            input.setEnabled(!state.snapshot.joining);
-            if self
-                .previous
-                .as_ref()
-                .is_some_and(|old| old.snapshot.joining)
-                && !state.snapshot.joining
-                && state.snapshot.error.is_some()
-            {
-                unsafe {
-                    input.selectText(None);
-                }
+            input.setEnabled(state.snapshot.joining.is_none());
+            if state.snapshot.paired {
+                input.setStringValue(&NSString::from_str(""));
             }
         }
         if let Some(picker) = self.callbacks.ivars().picker.borrow().as_ref() {
-            picker.setEnabled(!state.snapshot.joining);
+            picker.setEnabled(state.snapshot.joining.is_none());
         }
-        if let Some(item) = &self.generate {
-            item.setEnabled(!state.snapshot.joining);
-            item.setHidden(state.page == Page::Waiting && state.snapshot.error.is_none());
+        if let Some(generate) = &self.generate {
+            generate.setEnabled(state.snapshot.joining.is_none());
         }
+        self.callbacks.changed();
         if let Some(code) = &self.code {
-            code.setStringValue(&NSString::from_str(
-                state.snapshot.code.as_deref().unwrap_or("正在生成…"),
-            ));
+            code.setStringValue(&NSString::from_str(&state.code_label()));
         }
-        if let Some(item) = &self.remaining {
-            item.setTitle(&NSString::from_str(&if state.snapshot.code.is_some() {
-                format!(
-                    "剩余 {:02}:{:02} · 用后失效",
-                    state.snapshot.seconds_left / 60,
-                    state.snapshot.seconds_left % 60
-                )
-            } else {
-                String::new()
-            }));
+        if let Some(remaining) = &self.remaining {
+            remaining.setStringValue(&NSString::from_str(&state.remaining_label()));
         }
-        if let Some((item, error)) = &self.error {
+        if let Some(error) = &self.error {
             error.setStringValue(&NSString::from_str(state.message().unwrap_or("")));
+            error.setToolTip(state.message().map(NSString::from_str).as_deref());
             let color = if state.snapshot.error.is_some() {
                 NSColor::systemRedColor()
             } else {
                 NSColor::secondaryLabelColor()
             };
             error.setTextColor(Some(&color));
-            item.setHidden(state.message().is_none());
         }
         self.previous = Some(state.clone());
     }
 
-    pub fn show(&mut self) {
-        if self.callbacks.ivars().opened.get() || self.callbacks.ivars().opening.get() {
-            return;
-        }
-        if let Some(button) = self
-            .status_item
-            .as_ref()
-            .and_then(|item| item.button(self.callbacks.mtm()))
+    fn focus_input(&self) {
+        if let Some(input) = self.callbacks.ivars().input.borrow().as_ref()
+            && let Some(window) = self.root.window()
         {
-            self.callbacks.ivars().opening.set(true);
-            // Open outside Tao's callback so its common-mode event source can
-            // deliver pairing progress while AppKit tracks the native menu.
-            unsafe {
-                button.performSelector_withObject_afterDelay(sel!(performClick:), None, 0.0);
-            }
+            window.makeFirstResponder(Some(input));
         }
     }
 
+    pub fn show(&mut self) {
+        if !self.visible {
+            super::center_window(&self.window);
+        }
+        self.window.set_visible(true);
+        self.window.set_focus();
+        self.visible = true;
+        self.focus_input();
+    }
+
     pub fn hide(&mut self) {
-        if self.callbacks.ivars().opening.replace(false)
-            && let Some(button) = self
-                .status_item
-                .as_ref()
-                .and_then(|item| item.button(self.callbacks.mtm()))
-        {
-            unsafe {
-                NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(
-                    &button,
-                    sel!(performClick:),
-                    None,
-                );
-            }
-        }
-        if self.callbacks.ivars().opened.get() {
-            self.native.cancelTracking();
-        }
+        self.window.set_visible(false);
+        self.visible = false;
     }
 
     pub fn confirm_remove(&self, name: &str) -> bool {
@@ -497,17 +469,6 @@ impl Panel {
         alert.addButtonWithTitle(&NSString::from_str("取消"));
         alert.addButtonWithTitle(&NSString::from_str("移除"));
         alert.runModal() == 1001
-    }
-}
-
-impl Drop for Panel {
-    fn drop(&mut self) {
-        self.hide();
-        unsafe {
-            NSObject::cancelPreviousPerformRequestsWithTarget(&self.callbacks);
-            self.native.setDelegate(None);
-        }
-        self.native.removeAllItems();
     }
 }
 

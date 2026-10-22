@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
+  echo '桌面版安装脚本目前支持 x86_64 Linux。' >&2
+  exit 1
+fi
+for command in curl sha256sum; do
+  command -v "$command" >/dev/null || { echo "请先安装 $command。" >&2; exit 1; }
+done
+
+releases=https://github.com/harrisonwang/clipx/releases
+version=${1:-}
+if [[ -z "$version" ]]; then
+  latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$releases/latest")
+  version=${latest##*/}
+fi
+if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo '版本格式应为 v0.8.0；不传参数则安装最新正式版。' >&2
+  exit 1
+fi
+
+asset="clipx-gui_${version}_x86_64-unknown-linux-gnu.AppImage"
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+cd "$stage"
+curl -fL --retry 3 "$releases/download/$version/$asset" -o "$asset"
+curl -fsSL --retry 3 "$releases/download/$version/SHA256SUMS.txt" -o SHA256SUMS.txt
+awk -v name="$asset" '$2 == name { print; found = 1 } END { if (!found) exit 1 }' \
+  SHA256SUMS.txt > checksum
+sha256sum -c checksum
+chmod +x "$asset"
+"./$asset" --appimage-extract >/dev/null
+
+data_dir=${XDG_DATA_HOME:-"$HOME/.local/share"}
+if [[ "$data_dir" != /* ]]; then
+  echo 'XDG_DATA_HOME 必须是绝对路径。' >&2
+  exit 1
+fi
+app_dir="$data_dir/clipx"
+mkdir -p "$app_dir" "$data_dir/applications" "$data_dir/icons/hicolor/512x512/apps"
+install -m 755 "$asset" "$app_dir/clipx.AppImage.new"
+mv -f "$app_dir/clipx.AppImage.new" "$app_dir/clipx.AppImage"
+install -m 644 squashfs-root/clipx.png "$data_dir/icons/hicolor/512x512/apps/clipx.png"
+
+# Desktop Entry quoting also escapes reserved field-code and shell characters.
+executable=$(printf '%s' "$app_dir/clipx.AppImage" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
+cat > "$data_dir/applications/clipx.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=clipx
+Comment=跨设备剪贴板同步
+Exec=env APPIMAGE_EXTRACT_AND_RUN=1 "$executable"
+Icon=clipx
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+if command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$data_dir/applications"
+fi
+printf '已安装 clipx %s。请从应用菜单打开 clipx；再次运行此脚本即可更新。\n' "$version"

@@ -2,7 +2,7 @@ use crate::{
     config::{ConfigStore, DeviceConfig, DeviceId},
     discovery::Discovery,
     files::cleanup_stale_cache,
-    pairing::{Pairing, SharedPairing},
+    pairing::{JoinProgress, Pairing, SharedPairing},
     sync::clipboard_loop,
     transport::{PeerHub, network_loop},
 };
@@ -42,7 +42,7 @@ pub struct Snapshot {
     pub nearby: Vec<DeviceInfo>,
     pub code: Option<String>,
     pub seconds_left: u64,
-    pub joining: bool,
+    pub joining: Option<JoinProgress>,
     pub paired: bool,
     pub error: Option<String>,
 }
@@ -107,7 +107,7 @@ impl SyncRuntime {
         let mut nearby: Vec<_> = pairing
             .discovered
             .iter()
-            .filter(|peer| peer.inviting && !devices.iter().any(|saved| saved.id == peer.id))
+            .filter(|peer| peer.inviting && !connected.contains(&peer.id))
             .map(|peer| DeviceInfo {
                 id: peer.id,
                 name: peer.name.clone(),
@@ -120,7 +120,7 @@ impl SyncRuntime {
             nearby,
             code: pairing.invitation_code().map(str::to_owned),
             seconds_left: pairing.seconds_left(),
-            joining: pairing.is_joining(),
+            joining: pairing.join_progress(),
             paired: pairing.result.is_some(),
             error: pairing.error.clone(),
         }

@@ -261,7 +261,7 @@ pub(crate) fn network_loop(
             }
             if pairing.request.as_ref().is_some_and(|r| !r.started) {
                 let request = pairing.request.as_ref().unwrap();
-                let candidates: Vec<_> = pairing
+                let mut candidates: Vec<_> = pairing
                     .discovered
                     .iter()
                     .filter(|p| {
@@ -272,6 +272,8 @@ pub(crate) fn network_loop(
                                 .is_none_or(|d| *d == p.name || *d == hex::encode(p.id))
                     })
                     .collect();
+                let already_connected = candidates.iter().any(|peer| active.contains(&peer.id));
+                candidates.retain(|peer| !active.contains(&peer.id));
                 let target = if let Some(address) = &options.connect {
                     Some(([0; 16], PeerAddresses::Explicit(address.clone())))
                 } else if candidates.len() == 1 {
@@ -295,6 +297,9 @@ pub(crate) fn network_loop(
                 } else if candidates.len() > 1 {
                     pairing.request = None;
                     pairing.error = Some("发现多台待配对设备，请选择设备后重试".into());
+                } else if already_connected {
+                    pairing.request = None;
+                    pairing.error = Some("此设备已连接，无需重复配对".into());
                 }
             } else if pairing.request.is_none()
                 && let Some(address) = &options.connect
@@ -698,6 +703,35 @@ mod tests {
         assert_eq!(pair_over_tcp(&a, &b, &code, true), (false, false));
         assert_eq!(a.lock().unwrap().store.config.peers[0].key, key);
         drop((a, b));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adding_another_device_preserves_existing_pairing() {
+        let root = std::env::temp_dir().join(format!(
+            "clipx-multiple-peers-{}",
+            hex::encode(random_bytes::<16>().unwrap())
+        ));
+        let a = Pairing::new(ConfigStore::open(root.join("a/devices.json")).unwrap());
+        let b = Pairing::new(ConfigStore::open(root.join("b/devices.json")).unwrap());
+        let c = Pairing::new(ConfigStore::open(root.join("c/devices.json")).unwrap());
+        let code = b.lock().unwrap().invite().unwrap();
+        assert_eq!(pair_over_tcp(&a, &b, &code, true), (true, true));
+        let b_id = b.lock().unwrap().store.config.id;
+        let first_key = a.lock().unwrap().key_for(b_id).unwrap();
+
+        let code = a.lock().unwrap().invite().unwrap();
+        assert_eq!(pair_over_tcp(&c, &a, &code, true), (true, true));
+        let c_id = c.lock().unwrap().store.config.id;
+        let a_id = a.lock().unwrap().store.config.id;
+        assert_eq!(a.lock().unwrap().store.config.peers.len(), 2);
+        assert_eq!(a.lock().unwrap().key_for(b_id).unwrap(), first_key);
+        assert_eq!(b.lock().unwrap().key_for(a_id).unwrap(), first_key);
+        assert_eq!(
+            a.lock().unwrap().key_for(c_id).unwrap(),
+            c.lock().unwrap().key_for(a_id).unwrap()
+        );
+        drop((a, b, c));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

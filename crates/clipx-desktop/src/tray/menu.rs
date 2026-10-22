@@ -8,8 +8,7 @@ pub struct TrayMenu {
     pub menu: Menu,
     status: MenuItem,
     code: MenuItem,
-    generate: MenuItem,
-    input: MenuItem,
+    add: MenuItem,
     previous: Option<PanelState>,
 }
 
@@ -18,16 +17,23 @@ impl TrayMenu {
         let mut tray = Self {
             menu: Menu::new(),
             status: MenuItem::new("未配对", false, None),
-            code: MenuItem::new("正在生成…", false, None),
-            generate: MenuItem::with_id("generate", "生成配对码", true, None),
-            input: MenuItem::with_id("input", "输入配对码…", true, None),
+            code: MenuItem::with_id("code", "正在生成…", true, None),
+            add: MenuItem::with_id("add", "添加设备…", true, None),
             previous: None,
         };
+        #[cfg(target_os = "macos")]
+        {
+            use tray_icon::menu::ContextMenu;
+            // Muda owns the NSMenu; keep the compact native tray width.
+            unsafe {
+                let native = &*tray.menu.ns_menu().cast::<objc2_app_kit::NSMenu>();
+                native.setMinimumWidth(280.0);
+            }
+        }
         tray.update(&PanelState::default())?;
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let action = match event.id.as_ref() {
-                "generate" => Action::Generate,
-                "input" => Action::Add,
+                "add" | "code" => Action::Add,
                 "cancel" => Action::Cancel,
                 "quit" => Action::Quit,
                 id => {
@@ -87,8 +93,7 @@ impl TrayMenu {
                 }
             }
             self.menu.append(&PredefinedMenuItem::separator())?;
-            self.menu.append(&self.generate)?;
-            self.menu.append(&self.input)?;
+            self.menu.append(&self.add)?;
             if waiting {
                 self.menu
                     .append(&MenuItem::with_id("cancel", "取消配对", true, None))?;
@@ -98,16 +103,9 @@ impl TrayMenu {
                 .append(&MenuItem::with_id("quit", "退出", true, None))?;
         }
         self.status.set_text(state.status());
-        self.generate.set_enabled(!state.snapshot.joining);
-        self.input.set_enabled(!state.snapshot.joining);
-        self.generate.set_text(if waiting {
-            "重新生成配对码"
-        } else {
-            "生成配对码"
-        });
         self.code.set_text(match &state.snapshot.code {
             Some(code) => format!(
-                "{code} · 剩余 {:02}:{:02}",
+                "{code} · {:02}:{:02} 后更新",
                 state.snapshot.seconds_left / 60,
                 state.snapshot.seconds_left % 60
             ),

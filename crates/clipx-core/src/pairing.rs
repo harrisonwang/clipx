@@ -7,7 +7,14 @@ use std::{
 };
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(120);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ATTEMPTS: u8 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinProgress {
+    Discovering,
+    Connecting,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct DiscoveredPeer {
@@ -33,6 +40,7 @@ pub(crate) struct PairRequest {
     pub attempt: PairAttempt,
     pub device: Option<String>,
     pub started: bool,
+    discovery_deadline: Instant,
 }
 
 pub(crate) struct Pairing {
@@ -59,6 +67,11 @@ impl Pairing {
     }
 
     pub fn invite(&mut self) -> Result<String> {
+        self.cancel();
+        self.start_invitation()
+    }
+
+    fn start_invitation(&mut self) -> Result<String> {
         // Rejection sampling includes leading zeros and avoids modulo bias.
         let number = loop {
             let number = u32::from_le_bytes(random_bytes()?);
@@ -72,12 +85,17 @@ impl Pairing {
             code: code.clone(),
             expires: Instant::now() + PAIRING_LIFETIME,
         };
-        self.cancel();
         self.invitation = Some(Invitation {
             attempt,
             attempts: 0,
         });
+        self.error = None;
         Ok(code)
+    }
+
+    pub fn is_inviting(&self) -> bool {
+        // Renewal must not briefly withdraw the discovery advertisement.
+        self.invitation.is_some()
     }
 
     pub fn invitation_code(&self) -> Option<&str> {
@@ -96,8 +114,14 @@ impl Pairing {
         })
     }
 
-    pub fn is_joining(&self) -> bool {
-        self.request.is_some()
+    pub fn join_progress(&self) -> Option<JoinProgress> {
+        self.request.as_ref().map(|request| {
+            if request.started {
+                JoinProgress::Connecting
+            } else {
+                JoinProgress::Discovering
+            }
+        })
     }
 
     pub fn join(&mut self, code: &str, device: Option<String>) -> Result<()> {
@@ -112,6 +136,7 @@ impl Pairing {
             attempt,
             device,
             started: false,
+            discovery_deadline: Instant::now() + DISCOVERY_TIMEOUT,
         });
         Ok(())
     }
@@ -185,8 +210,13 @@ impl Pairing {
         } else if self.invitation.as_ref().is_some_and(|i| {
             i.attempt.generation == attempt.generation && i.attempts >= MAX_ATTEMPTS
         }) {
-            self.invitation = None;
-            self.error = Some("尝试次数过多".into());
+            // Keep invitation mode usable after exhausting the guess budget.
+            // Rotating here also means the UI never needs a manual regenerate
+            // action for a recoverable pairing failure.
+            if self.start_invitation().is_err() {
+                self.invitation = None;
+                self.error = Some("无法生成新的配对码".into());
+            }
         }
     }
 
@@ -196,14 +226,30 @@ impl Pairing {
             .invitation
             .as_ref()
             .is_some_and(|i| i.attempt.expires <= now)
-            || self
-                .request
-                .as_ref()
-                .is_some_and(|r| r.attempt.expires <= now)
         {
-            self.invitation = None;
+            // Keep the user's invitation mode active and rotate the short-lived
+            // code in place. The discovery advertisement remains available, so
+            // another device can continue pairing without reopening the panel.
+            if self.start_invitation().is_err() {
+                self.invitation = None;
+                self.error = Some("无法生成新的配对码".into());
+            }
+        } else if self
+            .request
+            .as_ref()
+            .is_some_and(|r| !r.started && r.discovery_deadline <= now)
+        {
             self.request = None;
-            self.error = Some("配对码已过期".into());
+            self.error = Some("未找到待配对设备，请确认对方正显示配对码且处于同一局域网".into());
+        } else if self
+            .request
+            .as_ref()
+            .is_some_and(|r| r.attempt.expires <= now)
+        {
+            // A joining device has no new code to display; return it to the
+            // input state and let the user enter the inviter's current code.
+            self.request = None;
+            self.error = Some("配对码已过期，请重新输入".into());
         }
     }
 }
@@ -298,6 +344,7 @@ mod tests {
         let a = pairing();
         let mut a = a.lock().unwrap();
         a.invite().unwrap();
+        let old_generation = a.invitation.as_ref().unwrap().attempt.generation;
         let attempts: Vec<_> = (0..MAX_ATTEMPTS)
             .map(|_| a.begin_incoming().unwrap())
             .collect();
@@ -305,9 +352,68 @@ mod tests {
         for attempt in attempts {
             a.failed(&attempt, false);
         }
-        assert!(a.invitation_code().is_none());
+        let invitation = a.invitation.as_ref().unwrap();
+        assert_ne!(invitation.attempt.generation, old_generation);
+        assert_eq!(invitation.attempts, 0);
+        assert!(a.invitation_code().is_some());
         assert!(a.store.config.peers.is_empty());
-        a.invite().unwrap();
         assert!(a.begin_incoming().is_ok());
+    }
+
+    #[test]
+    fn expired_invitation_rotates_without_leaving_waiting_state() {
+        let a = pairing();
+        let mut a = a.lock().unwrap();
+        a.invite().unwrap();
+        let old_generation = a.invitation.as_ref().unwrap().attempt.generation;
+        a.invitation.as_mut().unwrap().attempt.expires = Instant::now();
+        assert!(a.invitation_code().is_none());
+        assert!(a.is_inviting());
+
+        a.expire();
+
+        let invitation = a.invitation.as_ref().unwrap();
+        assert_ne!(invitation.attempt.generation, old_generation);
+        assert_eq!(invitation.attempts, 0);
+        assert!(invitation.attempt.expires > Instant::now());
+        assert!(a.invitation_code().is_some());
+        assert!(a.is_inviting());
+        assert!(a.error.is_none());
+        a.cancel();
+        assert!(!a.is_inviting());
+    }
+
+    #[test]
+    fn expired_join_returns_to_code_input() {
+        let a = pairing();
+        let mut a = a.lock().unwrap();
+        a.join("123456", None).unwrap();
+        a.request.as_mut().unwrap().started = true;
+        a.request.as_mut().unwrap().attempt.expires = Instant::now();
+
+        a.expire();
+
+        assert!(a.request.is_none());
+        assert_eq!(a.error.as_deref(), Some("配对码已过期，请重新输入"));
+    }
+
+    #[test]
+    fn discovery_timeout_is_distinct_from_an_expired_code() {
+        let a = pairing();
+        let mut a = a.lock().unwrap();
+        a.join("123456", None).unwrap();
+        assert_eq!(a.join_progress(), Some(JoinProgress::Discovering));
+        a.request.as_mut().unwrap().discovery_deadline = Instant::now();
+        a.expire();
+        assert!(a.join_progress().is_none());
+        assert!(a.error.as_deref().unwrap().starts_with("未找到待配对设备"));
+
+        a.join("123456", None).unwrap();
+        let request = a.request.as_mut().unwrap();
+        request.started = true;
+        request.discovery_deadline = Instant::now();
+        a.expire();
+        assert_eq!(a.join_progress(), Some(JoinProgress::Connecting));
+        assert!(a.error.is_none());
     }
 }

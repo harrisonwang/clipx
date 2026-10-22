@@ -11,7 +11,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(target_os = "linux"))]
 fn center_window(window: &tao::window::Window) {
     let Some(monitor) = window.current_monitor() else {
         return;

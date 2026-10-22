@@ -1,4 +1,4 @@
-use crate::app::{Action, AppEvent, PANEL_WIDTH, PanelState};
+use crate::app::{Action, AppEvent, PANEL_WIDTH, Page, PanelState, can_pair, normalize_code};
 use anyhow::{Result, bail};
 use clipx_core::DeviceId;
 use std::{
@@ -16,7 +16,7 @@ use tao::{
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::SystemServices::SS_LEFT,
+    System::SystemServices::{SS_CENTER, SS_ETCHEDHORZ, SS_LEFT},
     UI::{
         Controls::*,
         HiDpi::*,
@@ -31,11 +31,16 @@ const PICKER: usize = 11;
 const BUTTONS: usize = 100;
 
 fn panel_height(state: &PanelState) -> i32 {
-    136 + if state.snapshot.nearby.len() > 1 {
-        36
+    let base = if state.page == Page::Waiting {
+        260
+    } else {
+        196
+    };
+    base + if state.page == Page::Pair && state.snapshot.nearby.len() > 1 {
+        72
     } else {
         0
-    } + if state.message().is_some() { 44 } else { 0 }
+    } + if state.message().is_some() { 54 } else { 0 }
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -63,6 +68,8 @@ struct Callbacks {
     proxy: EventLoopProxy<AppEvent>,
     input: Cell<HWND>,
     picker: Cell<HWND>,
+    pair: Cell<HWND>,
+    generate: Cell<HWND>,
     nearby: RefCell<Vec<DeviceId>>,
     actions: RefCell<Vec<Action>>,
     submitting: Cell<bool>,
@@ -83,25 +90,46 @@ impl Callbacks {
             .and_then(|index| self.nearby.borrow().get(index).copied())
     }
 
-    fn submit(&self) {
+    fn changed(&self) {
         if self.input.get().is_null() || self.submitting.replace(true) {
             return;
         }
         let original = text(self.input.get());
-        let code: String = original
-            .chars()
-            .filter(char::is_ascii_digit)
-            .take(6)
-            .collect();
+        let code = normalize_code(&original);
         if code != original {
             set_text(self.input.get(), &code);
             unsafe {
                 SendMessageW(self.input.get(), EM_SETSEL, code.len(), code.len() as isize);
             }
         }
-        self.submitting.set(code.len() == 6);
-        if code.len() == 6 {
-            self.send(Action::Join(code, self.selected()));
+        self.submitting.set(false);
+        self.enable_pair();
+    }
+
+    fn enable_pair(&self) {
+        if !self.pair.get().is_null() {
+            let enabled = !self.submitting.get()
+                && can_pair(
+                    &text(self.input.get()),
+                    &self.nearby.borrow(),
+                    self.selected(),
+                );
+            unsafe {
+                EnableWindow(self.pair.get(), enabled as i32);
+            }
+        }
+    }
+
+    fn submit(&self) {
+        if self.input.get().is_null() || self.submitting.get() {
+            return;
+        }
+        let code = normalize_code(&text(self.input.get()));
+        let selected = self.selected();
+        if can_pair(&code, &self.nearby.borrow(), selected) {
+            self.submitting.set(true);
+            self.enable_pair();
+            self.send(Action::Join(code, selected));
         }
     }
 }
@@ -124,7 +152,7 @@ unsafe extern "system" fn panel_proc(
             if id == INPUT && notification == EN_CHANGE
                 || id == PICKER && notification == CBN_SELCHANGE
             {
-                callbacks.submit();
+                callbacks.changed();
             } else if id == IDCANCEL as usize {
                 callbacks.send(Action::Hide);
             } else if id == IDOK as usize {
@@ -172,6 +200,8 @@ pub struct Panel {
     callbacks: Box<Callbacks>,
     children: Vec<HWND>,
     fonts: Vec<HFONT>,
+    code: HWND,
+    remaining: HWND,
     error: HWND,
     previous: Option<PanelState>,
     scale: f64,
@@ -184,9 +214,11 @@ impl Panel {
         proxy: EventLoopProxy<AppEvent>,
     ) -> Result<Self> {
         let window = WindowBuilder::new()
-            .with_title("输入配对码")
+            .with_title("添加设备")
             .with_inner_size(LogicalSize::new(PANEL_WIDTH, 136.0))
             .with_resizable(false)
+            .with_minimizable(false)
+            .with_maximizable(false)
             .with_skip_taskbar(true)
             .with_visible(false)
             .build(target)?;
@@ -194,6 +226,8 @@ impl Panel {
             proxy,
             input: Cell::new(null_mut()),
             picker: Cell::new(null_mut()),
+            pair: Cell::new(null_mut()),
+            generate: Cell::new(null_mut()),
             nearby: RefCell::new(Vec::new()),
             actions: RefCell::new(Vec::new()),
             submitting: Cell::new(false),
@@ -225,6 +259,8 @@ impl Panel {
             callbacks,
             children: Vec::new(),
             fonts: Vec::new(),
+            code: null_mut(),
+            remaining: null_mut(),
             error: null_mut(),
             previous: None,
             scale: 1.0,
@@ -304,11 +340,15 @@ impl Panel {
             );
             let mut font = metrics.lfMessageFont;
             self.fonts.push(CreateFontIndirectW(&font));
-            font.lfHeight = -(16.0 * self.scale).round() as i32;
+            font.lfHeight = -(30.0 * self.scale).round() as i32;
             self.fonts.push(CreateFontIndirectW(&font));
         }
         self.callbacks.input.set(null_mut());
         self.callbacks.picker.set(null_mut());
+        self.callbacks.pair.set(null_mut());
+        self.callbacks.generate.set(null_mut());
+        self.code = null_mut();
+        self.remaining = null_mut();
         self.callbacks.actions.borrow_mut().clear();
         self.callbacks
             .nearby
@@ -318,115 +358,188 @@ impl Panel {
             .set_inner_size(LogicalSize::new(PANEL_WIDTH, height as f64));
         self.child(
             "STATIC",
-            "输入另一台设备生成的 6 位配对码。",
-            SS_LEFT,
-            0,
-            [16, 12, 248, 30],
-            0,
-        );
-        let input = self.child(
-            "EDIT",
             "",
-            WS_BORDER | WS_TABSTOP | ES_CENTER as u32 | ES_AUTOHSCROLL as u32,
-            INPUT,
-            [16, 48, 248, 30],
-            1,
+            SS_ETCHEDHORZ,
+            0,
+            [0, height - 60, PANEL_WIDTH as i32, 1],
+            0,
         );
-        self.callbacks.input.set(input);
-        unsafe {
-            SendMessageW(
-                input,
-                EM_SETCUEBANNER,
+        if state.page == Page::Waiting {
+            self.child("STATIC", "本机配对码", SS_LEFT, 0, [24, 24, 320, 20], 0);
+            self.child(
+                "STATIC",
+                "在另一台设备上输入此码。",
+                SS_LEFT,
                 0,
-                wide("输入 6 位配对码").as_ptr() as isize,
-            );
-        }
-        if state.snapshot.nearby.len() > 1 {
-            let picker = self.child(
-                "COMBOBOX",
-                "",
-                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
-                PICKER,
-                [16, 86, 248, 180],
+                [24, 52, 320, 20],
                 0,
             );
-            unsafe {
-                SendMessageW(picker, CB_ADDSTRING, 0, wide("选择设备").as_ptr() as isize);
-                for peer in &state.snapshot.nearby {
-                    SendMessageW(
-                        picker,
-                        CB_ADDSTRING,
-                        0,
-                        wide(&state.nearby_name(peer)).as_ptr() as isize,
-                    );
+            self.code = self.child("STATIC", "", SS_CENTER, 0, [24, 88, 320, 44], 1);
+            self.remaining = self.child("STATIC", "", SS_CENTER, 0, [24, 140, 320, 18], 0);
+            self.child(
+                "STATIC",
+                "关闭窗口后仍可配对。",
+                SS_LEFT,
+                0,
+                [24, 170, 320, 18],
+                0,
+            );
+            self.button("取消配对", Action::Cancel, [24, height - 44, 88, 28]);
+        } else {
+            self.child(
+                "STATIC",
+                "输入另一台设备上显示的配对码。",
+                SS_LEFT,
+                0,
+                [24, 24, 320, 20],
+                0,
+            );
+            let mut y = 64;
+            if state.snapshot.nearby.len() > 1 {
+                self.child("STATIC", "设备", SS_LEFT, 0, [24, y, 320, 18], 0);
+                let picker = self.child(
+                    "COMBOBOX",
+                    "",
+                    WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
+                    PICKER,
+                    [24, y + 24, 320, 180],
+                    0,
+                );
+                unsafe {
+                    SendMessageW(picker, CB_ADDSTRING, 0, wide("选择设备").as_ptr() as isize);
+                    for peer in &state.snapshot.nearby {
+                        SendMessageW(
+                            picker,
+                            CB_ADDSTRING,
+                            0,
+                            wide(&state.nearby_name(peer)).as_ptr() as isize,
+                        );
+                    }
+                    SendMessageW(picker, CB_SETCURSEL, 0, 0);
                 }
-                SendMessageW(picker, CB_SETCURSEL, 0, 0);
+                self.callbacks.picker.set(picker);
+                y += 72;
             }
-            self.callbacks.picker.set(picker);
+            self.child("STATIC", "配对码", SS_LEFT, 0, [24, y, 320, 18], 0);
+            let input = self.child(
+                "EDIT",
+                "",
+                WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_NUMBER as u32,
+                INPUT,
+                [24, y + 24, 320, 28],
+                0,
+            );
+            self.callbacks.input.set(input);
+            unsafe {
+                SendMessageW(
+                    input,
+                    EM_SETCUEBANNER,
+                    0,
+                    wide("6 位数字").as_ptr() as isize,
+                );
+            }
+            let generate = self.button("本机配对码…", Action::Generate, [24, height - 44, 116, 28]);
+            self.callbacks.generate.set(generate);
         }
         self.error = if state.message().is_some() {
-            self.child("STATIC", "", SS_LEFT, 0, [16, height - 84, 248, 36], 0)
+            self.child("STATIC", "", SS_LEFT, 0, [24, height - 106, 320, 42], 0)
         } else {
             null_mut()
         };
-        self.button("取消", Action::Hide, [208, height - 40, 56, 28]);
+        let close_x = if state.page == Page::Waiting {
+            280
+        } else {
+            208
+        };
+        self.button("关闭", Action::Hide, [close_x, height - 44, 64, 28]);
+        if state.page == Page::Pair {
+            let pair = self.child(
+                "BUTTON",
+                "配对",
+                WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+                IDOK as usize,
+                [280, height - 44, 64, 28],
+                0,
+            );
+            self.callbacks.pair.set(pair);
+        }
     }
 
     pub fn update(&mut self, state: &PanelState) {
         let rebuild = self.scale != self.window.scale_factor()
             || self.previous.as_ref().is_none_or(|old| {
-                panel_height(old) != panel_height(state)
-                    || old.snapshot.nearby != state.snapshot.nearby
+                old.page != state.page
+                    || panel_height(old) != panel_height(state)
+                    || (state.page == Page::Pair && old.snapshot.nearby != state.snapshot.nearby)
             });
         if rebuild {
-            let input = text(self.callbacks.input.get());
+            let keep_input = !state.snapshot.paired
+                && self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|old| old.page == Page::Pair && state.page == Page::Pair);
+            let input =
+                (!self.callbacks.input.get().is_null()).then(|| text(self.callbacks.input.get()));
             let selected = self.callbacks.selected();
-            let keep_input = self.previous.is_some();
             self.rebuild(state);
             if keep_input {
-                set_text(self.callbacks.input.get(), &input);
-                if let Some(index) = state
-                    .snapshot
-                    .nearby
-                    .iter()
-                    .position(|peer| Some(peer.id) == selected)
+                if let Some(input) = input {
+                    set_text(self.callbacks.input.get(), &input);
+                }
+                if let Some(selected) = selected
+                    && let Some(index) = state
+                        .snapshot
+                        .nearby
+                        .iter()
+                        .position(|peer| peer.id == selected)
                 {
                     unsafe {
                         SendMessageW(self.callbacks.picker.get(), CB_SETCURSEL, index + 1, 0);
                     }
                 }
             }
-            if self.visible {
+            if self.visible && !self.callbacks.input.get().is_null() {
                 unsafe {
                     SetFocus(self.callbacks.input.get());
                 }
             }
         }
-        self.callbacks.submitting.set(state.snapshot.joining);
+        self.callbacks
+            .submitting
+            .set(state.snapshot.joining.is_some());
         unsafe {
-            for control in [self.callbacks.input.get(), self.callbacks.picker.get()] {
-                EnableWindow(control, (!state.snapshot.joining) as i32);
+            for control in [
+                self.callbacks.input.get(),
+                self.callbacks.picker.get(),
+                self.callbacks.generate.get(),
+            ] {
+                EnableWindow(control, (state.snapshot.joining.is_none()) as i32);
             }
             if self
                 .previous
                 .as_ref()
-                .is_some_and(|old| old.snapshot.joining)
-                && !state.snapshot.joining
+                .is_some_and(|old| old.snapshot.joining.is_some())
+                && state.snapshot.joining.is_none()
                 && state.snapshot.error.is_some()
             {
                 SetFocus(self.callbacks.input.get());
                 SendMessageW(self.callbacks.input.get(), EM_SETSEL, 0, -1);
             }
         }
+        if state.snapshot.paired {
+            set_text(self.callbacks.input.get(), "");
+        }
+        self.callbacks.enable_pair();
+        set_text(self.code, &state.code_label());
+        set_text(self.remaining, &state.remaining_label());
         set_text(self.error, state.message().unwrap_or(""));
         self.previous = Some(state.clone());
     }
 
     pub fn show(&mut self) {
-        if self.visible {
-            return;
+        if !self.visible {
+            super::center_window(&self.window);
         }
-        super::center_window(&self.window);
         self.window.set_visible(true);
         self.window.set_focus();
         self.visible = true;
@@ -441,7 +554,6 @@ impl Panel {
         if self.visible {
             self.window.set_visible(false);
             self.visible = false;
-            self.previous = None;
         }
     }
 

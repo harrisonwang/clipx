@@ -4,7 +4,7 @@ use libappindicator_sys::{
     AppIndicatorCategory_APP_INDICATOR_CATEGORY_APPLICATION_STATUS,
     AppIndicatorStatus_APP_INDICATOR_STATUS_ACTIVE,
     AppIndicatorStatus_APP_INDICATOR_STATUS_PASSIVE, app_indicator_new_with_path,
-    app_indicator_set_menu, app_indicator_set_status,
+    app_indicator_set_menu, app_indicator_set_status, app_indicator_set_title,
 };
 use tray_icon::menu::{ContextMenu, Menu};
 
@@ -47,6 +47,7 @@ impl Indicator {
             );
             ensure!(!indicator.is_null(), "创建托盘图标失败");
             let object = from_glib_full(indicator.cast::<glib::gobject_ffi::GObject>());
+            app_indicator_set_title(indicator, c"clipx".as_ptr());
             app_indicator_set_menu(indicator, menu.gtk_context_menu().to_glib_none().0);
             app_indicator_set_status(indicator, AppIndicatorStatus_APP_INDICATOR_STATUS_ACTIVE);
             Ok(Self(object))

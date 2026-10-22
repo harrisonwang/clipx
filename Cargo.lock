@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "clipx-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clipx-core",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "clipx-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "clipx-desktop"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clipx-core",

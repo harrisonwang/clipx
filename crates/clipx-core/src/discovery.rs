@@ -66,7 +66,7 @@ impl Discovery {
     pub fn poll(&mut self, shared: &SharedPairing) {
         {
             let pairing = shared.lock().expect("配对状态锁已损坏");
-            let inviting = pairing.invitation_code().is_some();
+            let inviting = pairing.is_inviting();
             if inviting != self.inviting {
                 let result = Self::service(&pairing.store.config, self.address, inviting)
                     .and_then(|service| self.daemon.register(service).map_err(Into::into));

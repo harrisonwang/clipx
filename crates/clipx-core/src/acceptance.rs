@@ -20,7 +20,7 @@ fn lan_round_trip() {
     let other = if role == "mac" { "hp" } else { "mac" };
     let options = SyncOptions {
         listen: SocketAddr::from(([0, 0, 0, 0], 45919)),
-        ..SyncOptions::default()
+        connect: env::var("CLIPX_TEST_CONNECT").ok(),
     };
     let store = ConfigStore::load().unwrap();
     assert!(store.config.peers.is_empty());
@@ -49,8 +49,14 @@ fn lan_round_trip() {
             let code = pairing.lock().unwrap().invite()?;
             println!("CLIPX_TEST_CODE={code}");
         } else {
-            let mut code = String::new();
-            std::io::stdin().read_line(&mut code)?;
+            let code = match env::var("CLIPX_TEST_CODE") {
+                Ok(code) => code,
+                Err(_) => {
+                    let mut code = String::new();
+                    std::io::stdin().read_line(&mut code)?;
+                    code
+                }
+            };
             pairing.lock().unwrap().join(&code, None)?;
         }
         let deadline = Instant::now() + Duration::from_secs(30);

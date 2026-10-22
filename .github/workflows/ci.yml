@@ -45,6 +45,7 @@ jobs:
         run: |
           sh -n scripts/macos-dmg.sh
           bash -n scripts/linux-appimage.sh
+          bash -n scripts/install-linux.sh
           python3 -m json.tool .github/scoop/clipx.json.tmpl > /dev/null
           sed 's/{{CLASS_NAME}}/Clipx/g' .github/homebrew/formula.rb.tmpl | ruby -c
 
