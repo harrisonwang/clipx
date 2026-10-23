@@ -33,13 +33,13 @@ trap 'rm -rf "$stage"' EXIT
 export PATH="$tools_dir:$PATH"
 export APPIMAGE_EXTRACT_AND_RUN=1 DEPLOY_GTK_VERSION=3
 export LDAI_OUTPUT="$output_path" LINUXDEPLOY_OUTPUT_VERSION="$version" LDAI_NO_APPSTREAM=1
-"$deploy" --appdir "$stage/clipx.AppDir" \
+"$deploy" --appdir "$stage/zipover.AppDir" \
   --executable "$binary_path" \
-  --desktop-file "$repo_root/assets/linux/clipx.desktop" \
-  --icon-file "$repo_root/assets/clipx.png" \
+  --desktop-file "$repo_root/assets/linux/zipover.desktop" \
+  --icon-file "$repo_root/assets/zipover.png" \
   --library "$indicator" --plugin gtk
 # The GTK plugin forces X11; let GTK use the user's X11 or Wayland session.
-sed -i '/^export GDK_BACKEND=x11 /d' "$stage/clipx.AppDir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
-"$deploy" --appdir "$stage/clipx.AppDir" --output appimage
+sed -i '/^export GDK_BACKEND=x11 /d' "$stage/zipover.AppDir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+"$deploy" --appdir "$stage/zipover.AppDir" --output appimage
 test -x "$output_path"
 printf '已生成 %s\n' "$output_path"

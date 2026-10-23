@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key>
-  <string>clipx</string>
+  <string>Zipover</string>
   <key>CFBundleExecutable</key>
-  <string>clipx-gui</string>
+  <string>zipover-gui</string>
   <key>CFBundleIconFile</key>
-  <string>clipx</string>
+  <string>zipover</string>
   <key>CFBundleIdentifier</key>
-  <string>com.harrisonwang.clipx</string>
+  <string>com.harrisonwang.zipover</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>clipx</string>
+  <string>Zipover</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -27,10 +27,10 @@
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>clipx 需要发现并连接同一局域网内的设备，配对后加密同步剪贴板。</string>
+  <string>Zipover 需要发现并连接同一局域网内的设备，配对后加密同步剪贴板。</string>
   <key>NSBonjourServices</key>
   <array>
-    <string>_clipx._tcp</string>
+    <string>_zipover._tcp</string>
   </array>
 </dict>
 </plist>

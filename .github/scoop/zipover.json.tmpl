@@ -1,0 +1,44 @@
+{
+  "version": "{{VERSION}}",
+  "description": "Sync clipboard and files across devices on a LAN",
+  "homepage": "https://github.com/{{REPO}}",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": [
+        "{{BASE_URL}}/{{TOOL}}_{{TAG}}_x86_64-pc-windows-msvc.exe#/zipover.exe",
+        "{{BASE_URL}}/{{TOOL}}-gui_{{TAG}}_x86_64-pc-windows-msvc.exe#/zipover-gui.exe"
+      ],
+      "hash": [
+        "{{SHA256:{{TOOL}}_{{TAG}}_x86_64-pc-windows-msvc.exe}}",
+        "{{SHA256:{{TOOL}}-gui_{{TAG}}_x86_64-pc-windows-msvc.exe}}"
+      ]
+    }
+  },
+  "bin": [
+    "zipover.exe",
+    "zipover-gui.exe"
+  ],
+  "shortcuts": [
+    [
+      "zipover-gui.exe",
+      "Zipover"
+    ]
+  ],
+  "checkver": {
+    "github": "https://github.com/{{REPO}}"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": [
+          "https://github.com/{{REPO}}/releases/download/v$version/{{TOOL}}_v$version_x86_64-pc-windows-msvc.exe#/zipover.exe",
+          "https://github.com/{{REPO}}/releases/download/v$version/{{TOOL}}-gui_v$version_x86_64-pc-windows-msvc.exe#/zipover-gui.exe"
+        ]
+      }
+    },
+    "hash": {
+      "url": "https://github.com/{{REPO}}/releases/download/v$version/SHA256SUMS.txt"
+    }
+  }
+}

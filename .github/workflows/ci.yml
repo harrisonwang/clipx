@@ -46,8 +46,8 @@ jobs:
           sh -n scripts/macos-dmg.sh
           bash -n scripts/linux-appimage.sh
           bash -n scripts/install-linux.sh
-          python3 -m json.tool .github/scoop/clipx.json.tmpl > /dev/null
-          sed 's/{{CLASS_NAME}}/Clipx/g' .github/homebrew/formula.rb.tmpl | ruby -c
+          python3 -m json.tool .github/scoop/zipover.json.tmpl > /dev/null
+          sed 's/{{CLASS_NAME}}/Zipover/g' .github/homebrew/formula.rb.tmpl | ruby -c
 
       - name: Check Homebrew cask
         if: runner.os == 'macOS'
@@ -58,7 +58,7 @@ jobs:
           brew ruby -e '
             require "cask/cask_loader"
             source = File.read(ARGV.fetch(0))
-            values = { "TOOL" => "clipx", "VERSION" => "0.0.0", "TAG" => "v0.0.0",
+            values = { "TOOL" => "zipover", "VERSION" => "0.0.0", "TAG" => "v0.0.0",
                        "REPO" => "owner/repo", "BASE_URL" => "https://example.com" }
             values.each { |key, value| source.gsub!("{{#{key}}}", value) }
             source.gsub!(/\{\{SHA256:[^}]+\}\}/, "0" * 64)

@@ -1,15 +1,15 @@
 [workspace]
-members = ["crates/clipx-core", "crates/clipx-cli", "crates/clipx-desktop"]
+members = ["crates/zipover-core", "crates/zipover-cli", "crates/zipover-desktop"]
 resolver = "3"
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-clipx-core = { path = "crates/clipx-core" }
+zipover-core = { path = "crates/zipover-core" }
 hex = "0.4"
 png = "0.17"
 

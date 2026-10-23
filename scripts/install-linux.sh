@@ -9,7 +9,7 @@ for command in curl sha256sum; do
   command -v "$command" >/dev/null || { echo "请先安装 $command。" >&2; exit 1; }
 done
 
-releases=https://github.com/harrisonwang/clipx/releases
+releases=https://github.com/harrisonwang/zipover/releases
 version=${1:-}
 if [[ -z "$version" ]]; then
   latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$releases/latest")
@@ -20,7 +20,7 @@ if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-asset="clipx-gui_${version}_x86_64-unknown-linux-gnu.AppImage"
+asset="zipover-gui_${version}_x86_64-unknown-linux-gnu.AppImage"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cd "$stage"
@@ -37,21 +37,21 @@ if [[ "$data_dir" != /* ]]; then
   echo 'XDG_DATA_HOME 必须是绝对路径。' >&2
   exit 1
 fi
-app_dir="$data_dir/clipx"
+app_dir="$data_dir/zipover"
 mkdir -p "$app_dir" "$data_dir/applications" "$data_dir/icons/hicolor/512x512/apps"
-install -m 755 "$asset" "$app_dir/clipx.AppImage.new"
-mv -f "$app_dir/clipx.AppImage.new" "$app_dir/clipx.AppImage"
-install -m 644 squashfs-root/clipx.png "$data_dir/icons/hicolor/512x512/apps/clipx.png"
+install -m 755 "$asset" "$app_dir/zipover.AppImage.new"
+mv -f "$app_dir/zipover.AppImage.new" "$app_dir/zipover.AppImage"
+install -m 644 squashfs-root/zipover.png "$data_dir/icons/hicolor/512x512/apps/zipover.png"
 
 # Desktop Entry quoting also escapes reserved field-code and shell characters.
-executable=$(printf '%s' "$app_dir/clipx.AppImage" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
-cat > "$data_dir/applications/clipx.desktop" <<EOF
+executable=$(printf '%s' "$app_dir/zipover.AppImage" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
+cat > "$data_dir/applications/zipover.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=clipx
+Name=Zipover
 Comment=跨设备剪贴板同步
 Exec=env APPIMAGE_EXTRACT_AND_RUN=1 "$executable"
-Icon=clipx
+Icon=zipover
 Terminal=false
 Categories=Utility;
 StartupNotify=false
@@ -59,4 +59,4 @@ EOF
 if command -v update-desktop-database >/dev/null; then
   update-desktop-database "$data_dir/applications"
 fi
-printf '已安装 clipx %s。请从应用菜单打开 clipx；再次运行此脚本即可更新。\n' "$version"
+printf '已安装 Zipover %s。请从应用菜单打开 Zipover；再次运行此脚本即可更新。\n' "$version"

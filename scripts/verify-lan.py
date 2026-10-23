@@ -32,24 +32,24 @@ def test_executable(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', default='hp')
-    parser.add_argument('--remote-dir', default='/tmp/clipx-acceptance')
+    parser.add_argument('--remote-dir', default='/tmp/zipover-acceptance')
     args = parser.parse_args()
     stamp = str(int(time.time()))
     artifacts = ROOT / 'target' / 'lan-acceptance' / stamp
     artifacts.mkdir(parents=True)
-    remote_config = '/tmp/clipx-lan-' + stamp
-    local_env = dict(os.environ, CLIPX_CONFIG_DIR=str(artifacts / 'config'), CLIPX_TEST_ROLE='mac')
+    remote_config = '/tmp/zipover-lan-' + stamp
+    local_env = dict(os.environ, ZIPOVER_CONFIG_DIR=str(artifacts / 'config'), ZIPOVER_TEST_ROLE='mac')
     remote_dir = shlex.quote(args.remote_dir)
 
     def ssh(command, **kwargs):
         return run(['ssh', '-o', 'BatchMode=yes', args.host, command], **kwargs)
 
-    local_test = test_executable(run(['cargo', 'test', '--locked', '-p', 'clipx-core', '--lib', '--no-run', '--message-format=json'], cwd=ROOT, capture_output=True).stdout)
+    local_test = test_executable(run(['cargo', 'test', '--locked', '-p', 'zipover-core', '--lib', '--no-run', '--message-format=json'], cwd=ROOT, capture_output=True).stdout)
     ssh('mkdir -p ' + remote_dir)
     run(['rsync', '-azR', 'Cargo.toml', 'Cargo.lock', '.cargo', 'crates', 'assets', args.host + ':' + args.remote_dir + '/'], cwd=ROOT)
     prefix = 'cd ' + remote_dir + ' && PATH="$HOME/.cargo/bin:$PATH" '
-    remote_test = test_executable(ssh(prefix + 'cargo test --locked -p clipx-core --lib --no-run --message-format=json', capture_output=True).stdout)
-    remote_env = 'CLIPX_CONFIG_DIR=' + shlex.quote(remote_config) + ' CLIPX_TEST_ROLE=hp '
+    remote_test = test_executable(ssh(prefix + 'cargo test --locked -p zipover-core --lib --no-run --message-format=json', capture_output=True).stdout)
+    remote_env = 'ZIPOVER_CONFIG_DIR=' + shlex.quote(remote_config) + ' ZIPOVER_TEST_ROLE=hp '
     processes = []
     logs = []
     reader = None
@@ -61,8 +61,8 @@ def main():
 
         def capture_local():
             for line in local.stdout:
-                if line.startswith('CLIPX_TEST_CODE='):
-                    codes.put(line.removeprefix('CLIPX_TEST_CODE=').strip())
+                if line.startswith('ZIPOVER_TEST_CODE='):
+                    codes.put(line.removeprefix('ZIPOVER_TEST_CODE=').strip())
                 else:
                     mac_log.write(line)
                     mac_log.flush()

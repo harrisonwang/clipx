@@ -51,7 +51,7 @@ jobs:
       - name: Set version
         shell: bash
         run: |
-          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "clipx-cli") | .version')"
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "zipover-cli") | .version')"
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             if [[ "$GITHUB_REF_NAME" != "v$package_version" ]]; then
               echo "::error::Tag $GITHUB_REF_NAME does not match Cargo version v$package_version"
@@ -72,9 +72,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dmg="out/clipx-gui_${VERSION}_${{ matrix.target }}.dmg"
+          dmg="out/zipover-gui_${VERSION}_${{ matrix.target }}.dmg"
           scripts/macos-dmg.sh \
-            "target/${{ matrix.target }}/release/clipx-gui" \
+            "target/${{ matrix.target }}/release/zipover-gui" \
             "$dmg" "$BUNDLE_VERSION"
           mount_point="$(mktemp -d)"
           cleanup() {
@@ -83,7 +83,7 @@ jobs:
           }
           trap cleanup EXIT
           hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
-          "$mount_point/clipx.app/Contents/MacOS/clipx-gui" --version
+          "$mount_point/Zipover.app/Contents/MacOS/zipover-gui" --version
           test -L "$mount_point/Applications"
 
       - name: Package and verify (tar.gz)
@@ -91,20 +91,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pkg="clipx_${VERSION}_${{ matrix.target }}"
+          pkg="zipover_${VERSION}_${{ matrix.target }}"
           rm -rf package verify
-          mkdir -p "package/clipx" out verify
-          cp "target/${{ matrix.target }}/release/clipx" "package/clipx/"
-          cp README.md "package/clipx/"
+          mkdir -p "package/zipover" out verify
+          cp "target/${{ matrix.target }}/release/zipover" "package/zipover/"
+          cp README.md README.CN.md "package/zipover/"
           if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
-            cp -R "out/clipx.app" "package/clipx/"
+            cp -R "out/Zipover.app" "package/zipover/"
           fi
-          tar -C package -czf "out/${pkg}.tar.gz" clipx
+          tar -C package -czf "out/${pkg}.tar.gz" zipover
           tar -xzf "out/${pkg}.tar.gz" -C verify
-          "verify/clipx/clipx" --version
+          "verify/zipover/zipover" --version
           if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
-            test -x "verify/clipx/clipx.app/Contents/MacOS/clipx-gui"
-            test -f "verify/clipx/clipx.app/Contents/Resources/clipx.icns"
+            test -x "verify/zipover/Zipover.app/Contents/MacOS/zipover-gui"
+            test -f "verify/zipover/Zipover.app/Contents/Resources/zipover.icns"
           fi
 
       - name: Package and verify (portable EXE)
@@ -112,7 +112,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          foreach ($binary in @("clipx", "clipx-gui")) {
+          foreach ($binary in @("zipover", "zipover-gui")) {
             $source = "target\${{ matrix.target }}\release\$binary.exe"
             $destination = "out\${binary}_${env:VERSION}_${{ matrix.target }}.exe"
             Copy-Item $source $destination
@@ -125,22 +125,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          appimage="out/clipx-gui_${VERSION}_${{ matrix.target }}.AppImage"
+          appimage="out/zipover-gui_${VERSION}_${{ matrix.target }}.AppImage"
           scripts/linux-appimage.sh \
-            "target/${{ matrix.target }}/release/clipx-gui" \
+            "target/${{ matrix.target }}/release/zipover-gui" \
             "$appimage" "$BUNDLE_VERSION"
           "$appimage" --appimage-extract-and-run --version
           mkdir -p verify-appimage
           (cd verify-appimage && "../$appimage" --appimage-extract >/dev/null)
-          test -x verify-appimage/squashfs-root/usr/bin/clipx-gui
-          test -f verify-appimage/squashfs-root/clipx.desktop
-          test -f verify-appimage/squashfs-root/clipx.png
+          test -x verify-appimage/squashfs-root/usr/bin/zipover-gui
+          test -f verify-appimage/squashfs-root/zipover.desktop
+          test -f verify-appimage/squashfs-root/zipover.png
           test -f verify-appimage/squashfs-root/usr/lib/libayatana-appindicator3.so.1
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clipx_${{ matrix.target }}
+          name: zipover_${{ matrix.target }}
           if-no-files-found: error
           path: |
             out/*.tar.gz
@@ -191,6 +191,6 @@ jobs:
         run: |
           gh api --method POST "repos/$GITHUB_REPOSITORY_OWNER/${{ matrix.repository }}/dispatches" \
             -f event_type=tool-released \
-            -f 'client_payload[tool]=clipx' \
+            -f 'client_payload[tool]=zipover' \
             -f "client_payload[tag]=$GITHUB_REF_NAME" \
             -f "client_payload[repo]=$GITHUB_REPOSITORY"
