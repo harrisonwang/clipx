@@ -9,14 +9,14 @@ for command in curl sha256sum; do
   command -v "$command" >/dev/null || { echo "请先安装 $command。" >&2; exit 1; }
 done
 
-releases=https://github.com/harrisonwang/zipover/releases
+releases=https://github.com/harrisonwang/zipover-releases/releases
 version=${1:-}
 if [[ -z "$version" ]]; then
-  latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$releases/latest")
-  version=${latest##*/}
+  version=$(curl -fsSL https://raw.githubusercontent.com/harrisonwang/zipover-releases/main/channels/v1.json \
+    | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\(v1\.[0-9]*\.[0-9]*\)".*/\1/p')
 fi
-if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo '版本格式应为 v0.8.0；不传参数则安装最新正式版。' >&2
+if [[ ! "$version" =~ ^v1\.[0-9]+\.[0-9]+$ ]]; then
+  echo '版本格式应为 v1.0.0；不传参数则安装最新 1.x 正式版。' >&2
   exit 1
 fi
 

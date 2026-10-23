@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zipover-core", "crates/zipover-cli", "crates/zipover-desktop"]
+members = ["crates/zipover-core", "crates/zipover-cli"]
 resolver = "3"
 
 [workspace.package]

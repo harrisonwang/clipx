@@ -1,6 +1,8 @@
 mod args;
 
 use anyhow::{Context, Result, bail};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::path::PathBuf;
 use std::{env, thread, time::Duration};
 use zipover_core::{SyncOptions, SyncRuntime};
 
@@ -38,36 +40,14 @@ fn run() -> Result<()> {
             tray,
         } => {
             if tray {
-                let cli = env::current_exe()?;
-                let name = cli
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .context("程序路径无效")?;
-                let suffix =
-                    name.strip_prefix("zipover")
-                        .unwrap_or(if cfg!(windows) { ".exe" } else { "" });
-                let executable = cli.with_file_name(format!("zipover-gui{suffix}"));
-                #[cfg(target_os = "macos")]
-                let executable = {
-                    let app = cli
-                        .with_file_name("Zipover.app")
-                        .join("Contents/MacOS/zipover-gui");
-                    if app.is_file() { app } else { executable }
-                };
-                let mut command = std::process::Command::new(&executable);
-                #[cfg(target_os = "macos")]
-                if !executable.is_file() {
-                    // Cask installs the app separately from the CLI's Cellar directory.
-                    command = std::process::Command::new("open");
-                    command.args(["-W", "-b", "com.harrisonwang.zipover", "--args"]);
-                }
+                let mut command = desktop_command()?;
                 command.arg("--listen").arg(options.listen.to_string());
                 if let Some(address) = options.connect {
                     command.arg("--connect").arg(address);
                 }
                 if !command
                     .status()
-                    .context("请安装桌面版，或将 zipover-gui 放在 zipover 同一目录后重试")?
+                    .context("无法启动桌面版，请安装 zipover-gui 后重试")?
                     .success()
                 {
                     bail!("桌面程序启动失败");
@@ -78,6 +58,53 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn desktop_command() -> Result<std::process::Command> {
+    let cli = env::current_exe()?;
+    let name = if cfg!(windows) {
+        "zipover-gui.exe"
+    } else {
+        "zipover-gui"
+    };
+    let mut candidates = vec![cli.with_file_name(name)];
+    if let Some(path) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&path).map(|directory| directory.join(name)));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(
+        cli.with_file_name("Zipover.app")
+            .join("Contents/MacOS/zipover-gui"),
+    );
+    #[cfg(target_os = "windows")]
+    if let Some(scoop) = env::var_os("SCOOP")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(|path| PathBuf::from(path).join("scoop")))
+    {
+        candidates.push(scoop.join("apps/zipover-gui/current/zipover-gui.exe"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(data) = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|path| PathBuf::from(path).join(".local/share")))
+    {
+        candidates.push(data.join("zipover/zipover.AppImage"));
+    }
+    if let Some(executable) = candidates.into_iter().find(|path| path.is_file()) {
+        let mut command = std::process::Command::new(executable);
+        if cfg!(target_os = "linux") {
+            command.env("APPIMAGE_EXTRACT_AND_RUN", "1");
+        }
+        return Ok(command);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        command.args(["-W", "-b", "com.harrisonwang.zipover", "--args"]);
+        Ok(command)
+    }
+    #[cfg(not(target_os = "macos"))]
+    bail!("请先安装 zipover-gui 桌面版")
 }
 
 fn sync(options: SyncOptions, code: Option<String>, device: Option<String>) -> Result<()> {

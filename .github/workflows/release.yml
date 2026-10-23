@@ -3,21 +3,22 @@ name: release
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
 permissions:
   contents: read
 
+concurrency:
+  group: cli-release
+  cancel-in-progress: false
+
 jobs:
   ci:
-    name: ci
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: build (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
     needs: ci
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,167 +31,90 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install Linux desktop dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-common patchelf desktop-file-utils
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-
       - name: Set version
         shell: bash
         run: |
-          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "zipover-cli") | .version')"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            if [[ "$GITHUB_REF_NAME" != "v$package_version" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME does not match Cargo version v$package_version"
-              exit 1
-            fi
-            version="${GITHUB_REF_NAME}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "zipover-cli") | .version')"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag does not match CLI version"
+            exit 1
+          fi
+          echo "VERSION=v$version" >> "$GITHUB_ENV"
+      - run: cargo build --locked --release -p zipover-cli --target "${{ matrix.target }}"
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p out package/zipover
+          python3 scripts/licenses.py "$TARGET" "out/THIRD-PARTY-NOTICES_${TARGET}.txt"
+          cp LICENSE out/LICENSE
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cp "target/$TARGET/release/zipover.exe" "out/zipover_${VERSION}_${TARGET}.exe"
+            "out/zipover_${VERSION}_${TARGET}.exe" --version
           else
-            version="dev-${GITHUB_SHA::7}"
+            cp "target/$TARGET/release/zipover" LICENSE "out/THIRD-PARTY-NOTICES_${TARGET}.txt" package/zipover/
+            tar -C package -czf "out/zipover_${VERSION}_${TARGET}.tar.gz" zipover
+            package/zipover/zipover --version
           fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "BUNDLE_VERSION=${package_version%%[-+]*}" >> "$GITHUB_ENV"
-
-      - name: Build
-        run: cargo build --locked --workspace --release --target "${{ matrix.target }}"
-
-      - name: Package and verify (DMG)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          dmg="out/zipover-gui_${VERSION}_${{ matrix.target }}.dmg"
-          scripts/macos-dmg.sh \
-            "target/${{ matrix.target }}/release/zipover-gui" \
-            "$dmg" "$BUNDLE_VERSION"
-          mount_point="$(mktemp -d)"
-          cleanup() {
-            hdiutil detach "$mount_point" >/dev/null 2>&1 || true
-            rm -rf "$mount_point"
-          }
-          trap cleanup EXIT
-          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
-          "$mount_point/Zipover.app/Contents/MacOS/zipover-gui" --version
-          test -L "$mount_point/Applications"
-
-      - name: Package and verify (tar.gz)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pkg="zipover_${VERSION}_${{ matrix.target }}"
-          rm -rf package verify
-          mkdir -p "package/zipover" out verify
-          cp "target/${{ matrix.target }}/release/zipover" "package/zipover/"
-          cp README.md README.CN.md "package/zipover/"
-          if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
-            cp -R "out/Zipover.app" "package/zipover/"
-          fi
-          tar -C package -czf "out/${pkg}.tar.gz" zipover
-          tar -xzf "out/${pkg}.tar.gz" -C verify
-          "verify/zipover/zipover" --version
-          if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
-            test -x "verify/zipover/Zipover.app/Contents/MacOS/zipover-gui"
-            test -f "verify/zipover/Zipover.app/Contents/Resources/zipover.icns"
-          fi
-
-      - name: Package and verify (portable EXE)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          foreach ($binary in @("zipover", "zipover-gui")) {
-            $source = "target\${{ matrix.target }}\release\$binary.exe"
-            $destination = "out\${binary}_${env:VERSION}_${{ matrix.target }}.exe"
-            Copy-Item $source $destination
-            $process = Start-Process -FilePath (Resolve-Path $destination).Path -ArgumentList "--version" -Wait -PassThru
-            if ($process.ExitCode -ne 0) { throw "EXE smoke check failed: $destination" }
-          }
-
-      - name: Package and verify (AppImage)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          appimage="out/zipover-gui_${VERSION}_${{ matrix.target }}.AppImage"
-          scripts/linux-appimage.sh \
-            "target/${{ matrix.target }}/release/zipover-gui" \
-            "$appimage" "$BUNDLE_VERSION"
-          "$appimage" --appimage-extract-and-run --version
-          mkdir -p verify-appimage
-          (cd verify-appimage && "../$appimage" --appimage-extract >/dev/null)
-          test -x verify-appimage/squashfs-root/usr/bin/zipover-gui
-          test -f verify-appimage/squashfs-root/zipover.desktop
-          test -f verify-appimage/squashfs-root/zipover.png
-          test -f verify-appimage/squashfs-root/usr/lib/libayatana-appindicator3.so.1
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: zipover_${{ matrix.target }}
+          name: cli-${{ matrix.target }}
+          path: out/*
           if-no-files-found: error
-          path: |
-            out/*.tar.gz
-            out/*.exe
-            out/*.dmg
-            out/*.AppImage
 
   publish:
     if: github.ref_type == 'tag'
-    name: publish
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
+          pattern: cli-*
           path: artifacts
           merge-multiple: true
-
-      - name: Generate checksums
-        shell: bash
-        working-directory: artifacts
-        run: sha256sum *.exe *.tar.gz *.dmg *.AppImage > SHA256SUMS.txt
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-
-  notify:
-    name: notify (${{ matrix.repository }})
-    runs-on: ubuntu-latest
-    needs: publish
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - repository: homebrew-tap
-            token: HOMEBREW_TAP_TOKEN
-          - repository: scoop-bucket
-            token: SCOOP_BUCKET_TOKEN
-    steps:
-      - name: Dispatch release update
+      - name: Publish CLI
+        id: publish
         env:
-          GH_TOKEN: ${{ secrets[matrix.token] }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish-cli.py
+      - uses: actions/create-github-app-token@v2
+        id: app
+        if: steps.publish.outputs.latest == 'true'
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: harrisonwang
+          repositories: |
+            homebrew-tap
+            scoop-bucket
+          permission-contents: write
+      - name: Update package repositories
+        if: steps.publish.outputs.latest == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         shell: bash
         run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY_OWNER/${{ matrix.repository }}/dispatches" \
-            -f event_type=tool-released \
-            -f 'client_payload[tool]=zipover' \
-            -f "client_payload[tag]=$GITHUB_REF_NAME" \
-            -f "client_payload[repo]=$GITHUB_REPOSITORY"
+          major="${GITHUB_REF_NAME#v}"
+          major="${major%%.*}"
+          for repository in homebrew-tap scoop-bucket; do
+            gh api --method POST "repos/harrisonwang/$repository/dispatches" \
+              -f event_type=tool-released \
+              -f 'client_payload[tool]=zipover' \
+              -f 'client_payload[component]=cli' \
+              -f 'client_payload[repo]=harrisonwang/zipover' \
+              -f "client_payload[tag]=$GITHUB_REF_NAME" \
+              -F "client_payload[major]=$major"
+          done

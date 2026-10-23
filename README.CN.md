@@ -11,11 +11,13 @@
 
 <p align="center">
   macOS · Windows · Linux<br>
-  <a href="https://github.com/harrisonwang/zipover/releases/latest">下载</a> ·
+  <a href="https://github.com/harrisonwang/zipover-releases/releases/latest">下载</a> ·
   <a href="README.md">English</a>
 </p>
 
-在一台电脑上复制文字、图片、文件或文件夹，就能在另一台电脑上粘贴。Zipover 通过局域网直接连接你的电脑，传输全程加密，无需注册账号，也不经过云端。
+在一台电脑上复制文字、图片、文件或文件夹，就能在另一台电脑上粘贴。Zipover 通过局域网直接连接你的电脑，传输全程加密，剪贴板内容不经过云端。
+
+CLI 与 core 免费开源。Desktop 为独立商业软件：一次购买覆盖一个大版本、最多 5 台设备，仅主动激活或解绑时需要联网，激活后可长期离线使用，无需定期验证。
 
 ## 安装
 
@@ -33,7 +35,7 @@ brew install --cask harrisonwang/tap/zipover-gui
 
 ```powershell
 scoop bucket add harrisonwang https://github.com/harrisonwang/scoop-bucket
-scoop install zipover
+scoop install zipover-gui
 ```
 
 ### Linux
@@ -60,7 +62,7 @@ macOS 和 Linux 可通过 Homebrew 安装命令行版：
 brew install harrisonwang/tap/zipover
 ```
 
-Windows 的 Scoop 安装包已包含命令行版。
+Windows 使用 `scoop install zipover` 单独安装命令行版。
 
 ```sh
 zipover                    # 开始同步；首次运行会显示配对码
@@ -74,7 +76,7 @@ zipover --help              # 查看完整用法
 
 ## 从源码构建
 
-使用最新的 Rust 稳定版。Ubuntu 上还需安装 `libgtk-3-dev` 和 `libayatana-appindicator3-dev`。
+使用最新的 Rust 稳定版。本仓库仅构建 CLI 与 core；Desktop 源码独立维护。
 
 ```sh
 cargo build --locked --release --workspace

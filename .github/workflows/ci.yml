@@ -3,8 +3,7 @@ name: ci
 on:
   workflow_call:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
 
 permissions:
@@ -12,61 +11,24 @@ permissions:
 
 jobs:
   check:
-    name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-22.04
-          - windows-latest
-          - macos-latest
+        os: [ubuntu-22.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install Linux desktop dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-
-      - name: Check distribution scripts and templates
+      - uses: Swatinem/rust-cache@v2
+      - name: Format and distribution checks
         if: runner.os == 'Linux'
         run: |
-          sh -n scripts/macos-dmg.sh
-          bash -n scripts/linux-appimage.sh
+          cargo fmt --all -- --check
           bash -n scripts/install-linux.sh
+          python3 -m unittest discover -s scripts -p 'test_*.py'
           python3 -m json.tool .github/scoop/zipover.json.tmpl > /dev/null
           sed 's/{{CLASS_NAME}}/Zipover/g' .github/homebrew/formula.rb.tmpl | ruby -c
-
-      - name: Check Homebrew cask
-        if: runner.os == 'macOS'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_ANALYTICS: "1"
-        run: |
-          brew ruby -e '
-            require "cask/cask_loader"
-            source = File.read(ARGV.fetch(0))
-            values = { "TOOL" => "zipover", "VERSION" => "0.0.0", "TAG" => "v0.0.0",
-                       "REPO" => "owner/repo", "BASE_URL" => "https://example.com" }
-            values.each { |key, value| source.gsub!("{{#{key}}}", value) }
-            source.gsub!(/\{\{SHA256:[^}]+\}\}/, "0" * 64)
-            Cask::CaskLoader.load(source)
-          ' .github/homebrew/cask.rb.tmpl
-
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --locked --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --all-targets

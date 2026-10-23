@@ -11,11 +11,13 @@
 
 <p align="center">
   macOS · Windows · Linux<br>
-  <a href="https://github.com/harrisonwang/zipover/releases/latest">Download</a> ·
+  <a href="https://github.com/harrisonwang/zipover-releases/releases/latest">Download</a> ·
   <a href="README.CN.md">简体中文</a>
 </p>
 
-Copy text, images, files, or folders on one computer and paste them on another. Zipover connects your computers directly over your local network, with encrypted transfers and no account or cloud service required.
+Copy text, images, files, or folders on one computer and paste them on another. Zipover connects your computers directly over your local network, with encrypted transfers. Clipboard contents never pass through a cloud server.
+
+The CLI and core are free and open source. Desktop is a separate commercial app: a one-time purchase covers one major version and five devices. An Internet connection is required only to activate or deactivate a device; activated devices can be used offline without periodic license checks.
 
 ## Install
 
@@ -33,7 +35,7 @@ Using [Scoop](https://scoop.sh):
 
 ```powershell
 scoop bucket add harrisonwang https://github.com/harrisonwang/scoop-bucket
-scoop install zipover
+scoop install zipover-gui
 ```
 
 ### Linux
@@ -60,7 +62,7 @@ On macOS and Linux, install the CLI with Homebrew:
 brew install harrisonwang/tap/zipover
 ```
 
-The Windows Scoop package includes the CLI.
+On Windows, install the CLI with `scoop install zipover`.
 
 ```sh
 zipover                    # Start syncing; first run shows a pairing code
@@ -74,7 +76,7 @@ Run one instance per computer, using either the desktop app or the CLI. On Linux
 
 ## Build from source
 
-Use the latest stable Rust toolchain. On Ubuntu, install `libgtk-3-dev` and `libayatana-appindicator3-dev` first.
+Use the latest stable Rust toolchain. This repository builds the CLI and core; Desktop source is maintained separately.
 
 ```sh
 cargo build --locked --release --workspace

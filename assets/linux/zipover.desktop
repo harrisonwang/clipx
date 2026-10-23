@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Zipover
-Comment=跨设备剪贴板同步
-Exec=zipover-gui
-Icon=zipover
-Terminal=false
-Categories=Utility;
-StartupNotify=false
