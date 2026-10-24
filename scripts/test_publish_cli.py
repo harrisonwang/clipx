@@ -27,17 +27,24 @@ class PublishCliTests(unittest.TestCase):
         self.calls = []
         self.draft = True
         self.other_tags = []
+        self.exists = True
 
     def tearDown(self):
         os.chdir(self.previous)
         self.directory.cleanup()
 
-    def gh(self, *args):
+    def gh(self, *args, payload=None):
         self.calls.append(args)
         if args[:2] == ('api', '--paginate'):
-            return json.dumps([[{'tag_name': self.tag, 'draft': self.draft,
-                                 'assets': [{'name': name} for name in self.remote]}] +
+            current = [{'tag_name': self.tag, 'draft': self.draft,
+                        'assets': [{'name': name} for name in self.remote]}] if self.exists else []
+            return json.dumps([current +
                                [{'tag_name': tag, 'draft': False, 'assets': []} for tag in self.other_tags]])
+        if args[:3] == ('api', '--method', 'POST'):
+            self.assertEqual(payload['tag_name'], self.tag)
+            self.assertTrue(payload['draft'])
+            self.exists = True
+            return json.dumps({'id': 123, 'draft': True, 'assets': []})
         if args[:2] == ('release', 'upload'):
             path = Path(args[3])
             self.remote[path.name] = path.read_bytes()
@@ -60,6 +67,13 @@ class PublishCliTests(unittest.TestCase):
         self.assertEqual(self.remote, first)
         self.assertFalse(any(args[:2] == ('release', 'upload') for args in self.calls))
         self.assertEqual(sum(args[:2] == ('release', 'download') for args in self.calls), 10)
+
+    def test_first_release_uses_created_draft_without_fetching_by_tag(self):
+        self.exists = False
+        self.run_publish()
+        self.assertIn(('api', f'repos/{publish.REPOSITORY}/git/ref/tags/{self.tag}'), self.calls)
+        self.assertFalse(any(f'/releases/tags/{self.tag}' in str(args) for args in self.calls))
+        self.assertEqual(len(self.remote), 10)
 
     def test_changed_remote_asset_blocks_publication(self):
         self.remote['LICENSE'] = b'changed remote contents'

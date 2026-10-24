@@ -16,8 +16,11 @@ TARGETS = {
 }
 
 
-def gh(*args):
-    return subprocess.check_output(["gh", *args], text=True)
+def gh(*args, payload=None):
+    return subprocess.run(
+        ["gh", *args], input=json.dumps(payload) if payload is not None else None,
+        text=True, check=True, capture_output=True,
+    ).stdout
 
 
 def digest(path):
@@ -48,9 +51,12 @@ def main():
     pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{REPOSITORY}/releases"))
     release = next((r for page in pages for r in page if r["tag_name"] == tag), None)
     if release is None:
-        gh("release", "create", tag, "--repo", REPOSITORY, "--verify-tag", "--draft",
-           "--title", f"Zipover CLI {tag}", "--notes", f"Zipover CLI {tag}.")
-        release = json.loads(gh("api", f"repos/{REPOSITORY}/releases/tags/{tag}"))
+        gh("api", f"repos/{REPOSITORY}/git/ref/tags/{tag}")
+        release = json.loads(gh("api", "--method", "POST", f"repos/{REPOSITORY}/releases",
+                                "--input", "-", payload={
+                                    "tag_name": tag, "draft": True,
+                                    "name": f"Zipover CLI {tag}", "body": f"Zipover CLI {tag}.",
+                                }))
     existing = {asset["name"] for asset in release["assets"]}
     if existing - expected:
         raise ValueError("Existing release contains unexpected assets")
