@@ -13,11 +13,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Check package publishing credentials
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          for name in RELEASE_APP_ID RELEASE_APP_PRIVATE_KEY; do
+            test -n "${!name}" || { echo "::error::Missing release configuration: $name"; exit 1; }
+          done
+      - uses: actions/create-github-app-token@v2
+        if: github.ref_type == 'tag'
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: harrisonwang
+          repositories: |
+            homebrew-tap
+            scoop-bucket
+          permission-contents: write
+
   ci:
     uses: ./.github/workflows/ci.yml
 
   build:
-    needs: ci
+    needs: [prepare, ci]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
