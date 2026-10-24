@@ -13,7 +13,7 @@ def upstream_license(package, directory):
     vcs = directory / ".cargo_vcs_info.json"
     if not repository.startswith("https://github.com/") or not vcs.exists():
         return None
-    revision = json.loads(vcs.read_text())["git"]["sha1"]
+    revision = json.loads(vcs.read_text(encoding="utf-8"))["git"]["sha1"]
     base = repository.replace("https://github.com/", "https://raw.githubusercontent.com/")
     for filename in ("LICENSE", "LICENSE.md", "LICENSE-MIT", "COPYING"):
         try:
@@ -53,7 +53,7 @@ def main():
                          and path.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE")))
             if files or package["source"].startswith("registry+"):
                 break
-        license_text = "\n".join(path.read_text(errors="replace") for path in sorted(files))
+        license_text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(files))
         if not license_text:
             license_text = upstream_license(package, directory)
         if not license_text:
@@ -64,7 +64,7 @@ def main():
                       license_text)
     if missing:
         raise SystemExit("Missing dependency license files: " + ", ".join(missing))
-    Path(output).write_text("\n\n".join(blocks) + "\n")
+    Path(output).write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
