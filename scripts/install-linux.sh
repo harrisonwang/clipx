@@ -15,8 +15,8 @@ if [[ -z "$version" ]]; then
   version=$(curl -fsSL https://raw.githubusercontent.com/harrisonwang/zipover-releases/main/channels/v1.json \
     | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\(v1\.[0-9]*\.[0-9]*\)".*/\1/p')
 fi
-if [[ ! "$version" =~ ^v1\.[0-9]+\.[0-9]+$ ]]; then
-  echo '版本格式应为 v1.0.0；不传参数则安装最新 1.x 正式版。' >&2
+if [[ ! "$version" =~ ^v1\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]]; then
+  echo '版本格式应为 v1.0.0 或 v1.0.0-rc.1；不传参数则安装最新 1.x 正式版。' >&2
   exit 1
 fi
 
